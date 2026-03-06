@@ -57,10 +57,14 @@ async def predict_risk(request: PortfolioRequest):
         }
         
         # 3. Ingestion pipeline (fetch 5 years of data for consistency with training horizon)
-        fetcher = ETFDataFetcher(years=5)
-        output = fetcher.fetch_data(holdings_input)
-        price_data = output["price_data"]
-        weights = output["weights"]
+        try:
+            fetcher = ETFDataFetcher(years=5)
+            output = fetcher.fetch_data(holdings_input)
+            price_data = output["price_data"]
+            weights = output["weights"]
+        except ValueError as e:
+            # specifically catch ValueError from ingestion (like missing tickers)
+            raise HTTPException(status_code=400, detail=str(e))
         
         # 3. Portfolio Builder
         builder = PortfolioBuilder(price_data=price_data)
@@ -93,15 +97,35 @@ async def predict_risk(request: PortfolioRequest):
         max_dd = features_dict.get("Maximum_Drawdown", np.nan)
         div_ratio = features_dict.get("Diversification_Ratio", 1.0)
         
+        skewness = features_dict.get("Skewness", np.nan)
+        kurtosis = features_dict.get("Kurtosis", np.nan)
+        rolling_vol_20 = features_dict.get("RollingVol20", np.nan)
+        rolling_vol_60 = features_dict.get("RollingVol60", np.nan)
+        sharpe = features_dict.get("Sharpe", np.nan)
+        sortino = features_dict.get("Sortino", np.nan)
+        beta = features_dict.get("Beta", np.nan)
+        
         ml_features = pd.DataFrame([{
             "Vol": vol,
             "VaR95": var95,
             "MaxDD": max_dd,
-            "DivRatio": div_ratio
+            "DivRatio": div_ratio,
+            "Skewness": skewness,
+            "Kurtosis": kurtosis,
+            "RollingVol20": rolling_vol_20,
+            "RollingVol60": rolling_vol_60,
+            "Sharpe": sharpe,
+            "Sortino": sortino,
+            "Beta": beta
         }])
         
         # 6. Inference Layer (use sklearn model directly, respecting ordered FEATURES)
-        features_order = ["Vol", "VaR95", "MaxDD", "DivRatio"]
+        features_order = [
+            "Vol", "VaR95", "MaxDD", "DivRatio", 
+            "Skewness", "Kurtosis", "RollingVol20", "RollingVol60", 
+            "Sharpe", "Sortino", "Beta"
+        ]
+        
         X_infer = ml_features[features_order]
         prediction = sklearn_model.predict(X_infer)[0]
         

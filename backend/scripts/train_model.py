@@ -20,33 +20,172 @@ logger = logging.getLogger(__name__)
 
 MOCK_PORTFOLIOS = [
     {
-        "etf_name": "MOCK_IT_ETF",
+        "etf_name": "NIFTY_IT_ETF",
         "reporting_date": "2023-10-31",
         "holdings": [
-            {"ticker": "TCS.NS", "weight": 0.30},
-            {"ticker": "INFY.NS", "weight": 0.30},
-            {"ticker": "HCLTECH.NS", "weight": 0.20},
-            {"ticker": "WIPRO.NS", "weight": 0.20}
+            {"ticker": "TCS.NS", "weight": 0.28},
+            {"ticker": "INFY.NS", "weight": 0.28},
+            {"ticker": "HCLTECH.NS", "weight": 0.12},
+            {"ticker": "WIPRO.NS", "weight": 0.12},
+            {"ticker": "TECHM.NS", "weight": 0.10},
+            {"ticker": "LTIM.NS", "weight": 0.10}
         ]
     },
     {
-        "etf_name": "MOCK_BANK_ETF",
+        "etf_name": "NIFTY_BANK_ETF",
         "reporting_date": "2023-10-31",
         "holdings": [
             {"ticker": "HDFCBANK.NS", "weight": 0.35},
-            {"ticker": "ICICIBANK.NS", "weight": 0.30},
-            {"ticker": "SBIN.NS", "weight": 0.20},
-            {"ticker": "KOTAKBANK.NS", "weight": 0.15}
+            {"ticker": "ICICIBANK.NS", "weight": 0.25},
+            {"ticker": "SBIN.NS", "weight": 0.15},
+            {"ticker": "KOTAKBANK.NS", "weight": 0.15},
+            {"ticker": "AXISBANK.NS", "weight": 0.10}
         ]
     },
     {
-        "etf_name": "MOCK_AUTO_ETF",
+        "etf_name": "NIFTY_AUTO_ETF",
         "reporting_date": "2023-10-31",
         "holdings": [
-            {"ticker": "TATAMOTORS.NS", "weight": 0.30},
+            {"ticker": "TATAMOTORS.NS", "weight": 0.25},
             {"ticker": "M&M.NS", "weight": 0.25},
-            {"ticker": "MARUTI.NS", "weight": 0.25},
-            {"ticker": "BAJAJ-AUTO.NS", "weight": 0.20}
+            {"ticker": "MARUTI.NS", "weight": 0.20},
+            {"ticker": "BAJAJ-AUTO.NS", "weight": 0.15},
+            {"ticker": "EICHERMOT.NS", "weight": 0.15}
+        ]
+    },
+    {
+        "etf_name": "NIFTY_PHARMA_ETF",
+        "reporting_date": "2023-10-31",
+        "holdings": [
+            {"ticker": "SUNPHARMA.NS", "weight": 0.25},
+            {"ticker": "CIPLA.NS", "weight": 0.20},
+            {"ᚑticker": "DRREDDY.NS", "weight": 0.20},
+            {"ticker": "DIVISLAB.NS", "weight": 0.20},
+            {"ticker": "TORNTPHARM.NS", "weight": 0.15}
+        ]
+    },
+    {
+        "etf_name": "NIFTY_FMCG_ETF",
+        "reporting_date": "2023-10-31",
+        "holdings": [
+            {"ticker": "ITC.NS", "weight": 0.35},
+            {"ticker": "HUL.NS", "weight": 0.25},
+            {"ticker": "BRITANNIA.NS", "weight": 0.15},
+            {"ticker": "NESTLEIND.NS", "weight": 0.15},
+            {"ticker": "TATACONSUM.NS", "weight": 0.10}
+        ]
+    },
+    {
+        "etf_name": "NIFTY_METAL_ETF",
+        "reporting_date": "2023-10-31",
+        "holdings": [
+            {"ticker": "TATASTEEL.NS", "weight": 0.25},
+            {"ticker": "HINDALCO.NS", "weight": 0.25},
+            {"ticker": "JSWSTEEL.NS", "weight": 0.20},
+            {"ticker": "ADANIENT.NS", "weight": 0.15},
+            {"ticker": "COALINDIA.NS", "weight": 0.15}
+        ]
+    },
+    {
+        "etf_name": "NIFTY_ENERGY_ETF",
+        "reporting_date": "2023-10-31",
+        "holdings": [
+            {"ticker": "RELIANCE.NS", "weight": 0.35},
+            {"ticker": "NTPC.NS", "weight": 0.20},
+            {"ticker": "ONGC.NS", "weight": 0.15},
+            {"ticker": "POWERGRID.NS", "weight": 0.15},
+            {"ticker": "IOC.NS", "weight": 0.15}
+        ]
+    },
+    {
+        "etf_name": "CONSERVATIVE_DEBT_PROXY_ETF",
+        "reporting_date": "2023-10-31",
+        "holdings": [
+            {"ticker": "LIQUIDBEES.NS", "weight": 0.60},
+            {"ticker": "HDFCBANK.NS", "weight": 0.15},
+            {"ticker": "ITC.NS", "weight": 0.15},
+            {"ticker": "INFY.NS", "weight": 0.10}
+        ]
+    },
+    {
+        "etf_name": "AGGRESSIVE_GROWTH_ETF",
+        "reporting_date": "2023-10-31",
+        "holdings": [
+            {"ticker": "ZOMATO.NS", "weight": 0.20},
+            {"ticker": "PAYTM.NS", "weight": 0.20},
+            {"ticker": "POLICYBZR.NS", "weight": 0.20},
+            {"ticker": "NYKAA.NS", "weight": 0.20},
+            {"ticker": "DELHIVERY.NS", "weight": 0.20}
+        ]
+    },
+    {
+        "etf_name": "HIGH_DIVIDEND_YIELD_ETF",
+        "reporting_date": "2023-10-31",
+        "holdings": [
+            {"ticker": "COALINDIA.NS", "weight": 0.25},
+            {"ticker": "ONGC.NS", "weight": 0.25},
+            {"ticker": "PFC.NS", "weight": 0.20},
+            {"ticker": "RECLTD.NS", "weight": 0.20},
+            {"ticker": "ITC.NS", "weight": 0.10}
+        ]
+    },
+    {
+        "etf_name": "NIFTY_FINANCIAL_SERVICES_ETF",
+        "reporting_date": "2023-10-31",
+        "holdings": [
+            {"ticker": "BAJFINANCE.NS", "weight": 0.25},
+            {"ticker": "CHOLAFIN.NS", "weight": 0.20},
+            {"ticker": "MUTHOOTFIN.NS", "weight": 0.20},
+            {"ticker": "BAJAJFINSV.NS", "weight": 0.20},
+            {"ticker": "SRF.NS", "weight": 0.15}
+        ]
+    },
+    {
+        "etf_name": "REALTY_INFRA_ETF",
+        "reporting_date": "2023-10-31",
+        "holdings": [
+            {"ticker": "DLF.NS", "weight": 0.30},
+            {"ticker": "L&T.NS", "weight": 0.30},
+            {"ticker": "GODREJPROP.NS", "weight": 0.15},
+            {"ticker": "MACROTECH.NS", "weight": 0.15},
+            {"ticker": "OBEROIRLTY.NS", "weight": 0.10}
+        ]
+    },
+    {
+        "etf_name": "MID_CAP_BLEND_ETF",
+        "reporting_date": "2023-10-31",
+        "holdings": [
+            {"ticker": "TRENT.NS", "weight": 0.20},
+            {"ticker": "TVSMOTOR.NS", "weight": 0.20},
+            {"ticker": "CGPOWER.NS", "weight": 0.20},
+            {"ticker": "CUMMINSIND.NS", "weight": 0.20},
+            {"ticker": "POLYCAB.NS", "weight": 0.20}
+        ]
+    },
+    {
+        "etf_name": "LARGECAP_50_MOCK_ETF",
+        "reporting_date": "2023-10-31",
+        "holdings": [
+            {"ticker": "HDFCBANK.NS", "weight": 0.15},
+            {"ticker": "RELIANCE.NS", "weight": 0.15},
+            {"ticker": "ICICIBANK.NS", "weight": 0.10},
+            {"ticker": "INFY.NS", "weight": 0.10},
+            {"ticker": "TCS.NS", "weight": 0.10},
+            {"ticker": "ITC.NS", "weight": 0.10},
+            {"ticker": "L&T.NS", "weight": 0.10},
+            {"ticker": "SBIN.NS", "weight": 0.10},
+            {"ticker": "BHARTIARTL.NS", "weight": 0.10}
+        ]
+    },
+    {
+        "etf_name": "TATA_CONGLOMERATE_ETF",
+        "reporting_date": "2023-10-31",
+        "holdings": [
+            {"ticker": "TCS.NS", "weight": 0.25},
+            {"ticker": "TATAMOTORS.NS", "weight": 0.20},
+            {"ticker": "TATASTEEL.NS", "weight": 0.20},
+            {"ticker": "TITAN.NS", "weight": 0.20},
+            {"ticker": "TATAPOWER.NS", "weight": 0.15}
         ]
     }
 ]
@@ -96,6 +235,12 @@ def main():
     panel_df = dataset_builder.build_panel_dataset()
     logger.info(f"Successfully built panel dataset. Shape: {panel_df.shape}")
     logger.info(f"Class distribution:\n{panel_df['Label'].value_counts()}")
+
+    # Save the generated dataset to a CSV file
+    dataset_path = project_root / 'backend' / 'src' / 'models' / 'training_dataset.csv'
+    dataset_path.parent.mkdir(parents=True, exist_ok=True)
+    panel_df.to_csv(dataset_path, index=False)
+    logger.info(f"Saved generated training dataset to: {dataset_path}")
 
     # 4. Training Model (ML Classifier)
     logger.info("Initializing RiskClassifier...")
