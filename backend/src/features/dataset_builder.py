@@ -35,16 +35,76 @@ class DatasetBuilder:
         self.component_returns_dict = component_returns_dict or {}
         self.weights_dict = weights_dict or {}
         
-    def _assign_risk_label(self, vol: float, var95: float, max_dd: float) -> str:
+        # Use first portfolio's Daily_Return as a market proxy for Beta calculation
+        first_portfolio = list(self.portfolios.keys())[0]
+        self.market_proxy = self.portfolios[first_portfolio]['Daily_Return'].dropna()
+        
+    def _assign_risk_label(self, vol: float, var95: float, max_dd: float, div_ratio: float = 1.0, 
+                           skewness: float = 0.0, kurtosis: float = 0.0, 
+                           rolling_vol_20: float = 0.0, rolling_vol_60: float = 0.0,
+                           sharpe: float = 0.0, sortino: float = 0.0, beta: float = 1.0) -> str:
         """
-        Assigns a predefined Risk Class (Low, Medium, High) based on computed metrics.
-        This rule-based label provides the target for the ML classification model.
+        Assigns a Risk Class (Low, Medium, High) using a continuous composite score.
+        Introduces fuzzy boundaries to prevent perfect rule reconstruction by ML models.
         """
-        if vol < 0.12 and max_dd < 0.15:
+        # Normalize original metrics
+        norm_vol = min(vol / 0.25, 1.0)        # Assume 25% vol is extreme
+        norm_var = min(var95 / 0.05, 1.0)      # Assume 5% daily VaR is extreme
+        norm_dd = min(max_dd / 0.30, 1.0)      # Assume 30% drawdown is extreme
+        # Invert div_ratio (higher ratio = lower risk)
+        norm_div_penalty = 1.0 - min(max(div_ratio - 1.0, 0), 1.0) 
+
+        # Normalize new metrics safely with fallbacks if nan
+        safe_skew = 0.0 if pd.isna(skewness) else skewness
+        norm_skew_penalty = min(abs(min(safe_skew, 0)) / 2.0, 1.0) # 0 to 1
+
+        safe_kurt = 0.0 if pd.isna(kurtosis) else kurtosis
+        norm_kurt_penalty = min(max(safe_kurt, 0) / 5.0, 1.0)
+
+        safe_beta = 1.0 if pd.isna(beta) else beta
+        norm_beta_penalty = min(max(safe_beta - 1.0, 0) / 0.5, 1.0)
+
+        safe_sortino = 0.0 if pd.isna(sortino) else sortino
+        norm_sortino_penalty = 1.0 - min(max(safe_sortino, 0) / 2.0, 1.0)
+
+        # Create a non-linear composite risk score (0 to 1)
+        # Weights emphasize severe downside (MaxDD and VaR) over pure Volatility
+        core_score = (0.25 * norm_vol) + (0.35 * norm_var) + (0.15 * norm_dd)
+        
+        # New tail/exposure factors (25% of weight)
+        tail_score = (0.10 * norm_skew_penalty) + (0.05 * norm_kurt_penalty) + (0.05 * norm_beta_penalty) + (0.05 * norm_sortino_penalty)
+        
+        composite_score = core_score + tail_score
+        
+        # Apply diversification penalty as a modifier
+        composite_score = composite_score * (1.0 + (0.15 * norm_div_penalty))
+        
+        # Base logical cutoff thresholds
+        low_threshold = 0.35
+        high_threshold = 0.65
+
+        # Introduce realistic "fuzziness" (overlap) at the boundaries 
+        if composite_score < low_threshold:
+            if max_dd > 0.15 and vol < 0.10: 
+                return "Medium"
+            if safe_beta > 1.5:
+                return "Medium"
             return "Low"
-        elif vol > 0.20 or max_dd > 0.25 or var95 > 0.03:
+            
+        elif composite_score > high_threshold:
+            if div_ratio > 1.8 and vol < 0.25:
+                return "Medium"
+            if safe_sortino > 2.0:
+                return "Medium"
             return "High"
+            
         else:
+            if norm_var > 0.8: 
+                 return "High"
+            if composite_score < 0.45 and max_dd < 0.10: 
+                 return "Low"
+            if safe_kurt > 5.0 or safe_skew < -1.5:
+                 return "High"
             return "Medium"
 
     def build_panel_dataset(self) -> pd.DataFrame:
@@ -90,10 +150,19 @@ class DatasetBuilder:
                      except Exception as e:
                          logger.warning(f"Could not slice component returns for {portfolio_id}: {e}")
                 
+                # Slice market proxy for beta calculation
+                window_market_returns = None
+                if self.market_proxy is not None:
+                     try:
+                         window_market_returns = self.market_proxy.loc[window_start:window_end]
+                     except Exception:
+                         pass
+                
                 engineer = RiskFeatureEngineer(
                     portfolio_returns=window_returns,
                     component_returns=window_component_returns,
-                    weights=weights
+                    weights=weights,
+                    market_returns=window_market_returns
                 )
                 
                 features = engineer.compute_all_features()
@@ -101,9 +170,16 @@ class DatasetBuilder:
                 vol = features.get("Annualized_Volatility", np.nan)
                 var95 = features.get("Historical_VaR_95", np.nan)
                 max_dd = features.get("Maximum_Drawdown", np.nan)
-                div_ratio = features.get("Diversification_Ratio", 1.0) # Default to 1.0 if untrackable
+                div_ratio = features.get("Diversification_Ratio", 1.0)
+                skewness = features.get("Skewness", np.nan)
+                kurtosis = features.get("Kurtosis", np.nan)
+                rolling_vol_20 = features.get("RollingVol20", np.nan)
+                rolling_vol_60 = features.get("RollingVol60", np.nan)
+                sharpe = features.get("Sharpe", np.nan)
+                sortino = features.get("Sortino", np.nan)
+                beta = features.get("Beta", np.nan)
                 
-                label = self._assign_risk_label(vol, var95, max_dd)
+                label = self._assign_risk_label(vol, var95, max_dd, div_ratio, skewness, kurtosis, rolling_vol_20, rolling_vol_60, sharpe, sortino, beta)
                 
                 rows.append({
                     "Portfolio_ID": portfolio_id,
@@ -113,6 +189,13 @@ class DatasetBuilder:
                     "VaR95": var95,
                     "MaxDD": max_dd,
                     "DivRatio": div_ratio,
+                    "Skewness": skewness,
+                    "Kurtosis": kurtosis,
+                    "RollingVol20": rolling_vol_20,
+                    "RollingVol60": rolling_vol_60,
+                    "Sharpe": sharpe,
+                    "Sortino": sortino,
+                    "Beta": beta,
                     "Label": label
                 })
                 
