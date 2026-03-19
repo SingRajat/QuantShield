@@ -41,7 +41,7 @@ class RiskClassifier:
             n_estimators=200,
             max_depth=12,
             random_state=random_state,
-            class_weight={None}  # Handle potential class imbalances
+            class_weight=None  # Handle potential class imbalances
         )
         self.is_trained = False
         
