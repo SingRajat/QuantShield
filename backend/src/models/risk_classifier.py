@@ -15,7 +15,19 @@ class RiskClassifier:
     Maximum Drawdown, and Diversification Ratio.
     """
     
-    FEATURES = ["Vol", "VaR95", "MaxDD", "DivRatio"]
+    FEATURES = [
+        "Vol",
+        "VaR95",
+        "MaxDD",
+        "DivRatio",
+        "Skewness",
+        "Kurtosis",
+        "RollingVol20",
+        "RollingVol60",
+        "Sharpe",
+        "Sortino",
+        "Beta"
+    ]
     TARGET = "Label"
     
     def __init__(self, random_state: int = 42):
@@ -26,10 +38,10 @@ class RiskClassifier:
             random_state (int): Seed for reproducibility of the Random Forest model.
         """
         self.model = RandomForestClassifier(
-            n_estimators=100,
-            max_depth=5,
+            n_estimators=200,
+            max_depth=12,
             random_state=random_state,
-            class_weight="balanced"  # Handle potential class imbalances
+            class_weight=None  # Handle potential class imbalances
         )
         self.is_trained = False
         

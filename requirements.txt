@@ -5,3 +5,8 @@ scikit-learn
 streamlit
 requests
 pytest
+python-dateutil
+fastapi
+joblib
+pydantic
+uvicorn
