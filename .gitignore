@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Models and Generated Datasets
+backend/src/models/saved_model.pkl
+backend/src/models/*.csv
+backend/src/models/__pycache__/
+backend/tests/__pycache__/
+*.csv
+
+# Logs and Debug
+run_logs.txt
+viz_err.txt
+eval_log.txt
+eval_log2.txt
+*.log
+
+# IDEs and OS
+.vscode/
+.idea/
+.DS_Store
