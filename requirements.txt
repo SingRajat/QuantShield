@@ -10,3 +10,5 @@ fastapi
 joblib
 pydantic
 uvicorn
+python-dotenv
+langchain-groq

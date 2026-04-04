@@ -7,7 +7,7 @@ st.set_page_config(page_title="Risk Monitoring System", layout="wide", page_icon
 
 API_URL = "http://localhost:8000/api/v1/risk/predict"
 
-st.title("🛡️ AI-Based Portfolio Risk Monitoring")
+st.title("AI-Based Portfolio Risk Monitoring")
 st.markdown("Analyze asset-wise exposure and evaluate key risk indicators (volatility, diversification, concentration risk).")
 
 # Sidebar for Portfolio Input
