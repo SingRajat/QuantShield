@@ -2,6 +2,9 @@ import pytest
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 from src.features.portfolio_builder import PortfolioBuilder
 
 @pytest.fixture
