@@ -39,6 +39,7 @@ class RiskClassifier:
         """
         self.model = RandomForestClassifier(
             n_estimators=200,
+            min_samples_leaf=10,
             max_depth=12,
             random_state=random_state,
             class_weight=None  # Handle potential class imbalances
