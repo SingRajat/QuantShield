@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from langchain_groq import ChatGroq
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
+from langchain_core.messages import SystemMessage, HumanMessage
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ class LLMAgent:
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
         self.chain = None
+        self.llm = None
         
         if self.api_key:
             try:
@@ -66,6 +68,7 @@ Rules you MUST follow:
                 
                 # Construct LCEL (LangChain Expression Language) Chain
                 self.chain = prompt | llm | StrOutputParser()
+                self.llm = llm
                 logger.info("LangChain Groq client initialized successfully.")
             except Exception as e:
                 logger.error(f"Failed to initialize LangChain Groq client: {e}")
@@ -130,6 +133,83 @@ Rules you MUST follow:
         except Exception as e:
             logger.error(f"LangChain Groq API call failed: {e}. Using deterministic fallback.")
             return self._fallback_explanation(risk_class, features)
+
+    def _fallback_dashboard_explanations(self, risk_class: str, features: dict, portfolio_return: float, benchmark_return: float) -> dict:
+        """Deterministic fallback for per-section dashboard insights."""
+        vol = features.get('Annualized_Volatility', 0)
+        var = features.get('Historical_VaR_95', 0)
+        max_dd = features.get('Maximum_Drawdown', 0)
+        sharpe = features.get('Sharpe', 0)
+
+        perf_diff = portfolio_return - benchmark_return
+        direction = "outperformed" if perf_diff > 0 else "underperformed"
+
+        return {
+            "risk_gauge": (
+                f"This portfolio has been classified as {risk_class} risk. "
+                f"Its annualized volatility is {vol:.2%} and the worst-case daily loss (95% confidence) is {var:.2%}."
+            ),
+            "advanced_analytics": (
+                f"Over the last 6 months, the portfolio has {direction} the benchmark by {abs(perf_diff):.2%}. "
+                f"The portfolio's Sharpe ratio is {sharpe:.2f}, indicating its historical risk-adjusted return."
+            ),
+            "asset_correlation": (
+                "The correlation heatmap shows how individual assets moved relative to each other. "
+                "Higher correlations (closer to 1.0) mean assets tend to move together, reducing diversification benefit."
+            )
+        }
+
+    def generate_dashboard_explanations(self, risk_class: str, features: dict, portfolio_return: float, benchmark_return: float) -> dict:
+        """
+        Generates per-section AI insights for the dashboard using Llama 3.3 70B.
+        Returns a dict with keys: risk_gauge, advanced_analytics, asset_correlation.
+        """
+        if not self.llm:
+            logger.info("Using deterministic fallback for dashboard explanations.")
+            return self._fallback_dashboard_explanations(risk_class, features, portfolio_return, benchmark_return)
+
+        try:
+            vol = features.get('Annualized_Volatility', 0)
+            var = features.get('Historical_VaR_95', 0)
+            max_dd = features.get('Maximum_Drawdown', 0)
+            sharpe = features.get('Sharpe', 0)
+            perf_diff = portfolio_return - benchmark_return
+
+            response = self.llm.invoke([
+                SystemMessage(content="You are a financial risk analyst providing brief dashboard insights. Each insight must be 1-2 sentences, plain English, no jargon, strictly backward-looking. Never give investment advice."),
+                HumanMessage(content=f"""Provide 3 brief dashboard insights for a {risk_class} risk portfolio:
+
+Data: Volatility={vol:.2%}, VaR95={var:.2%}, MaxDD={max_dd:.2%}, Sharpe={sharpe:.2f}
+Portfolio 6-month return: {portfolio_return:.2%}, vs Benchmark: {perf_diff:+.2%}
+
+Format EXACTLY as (each under 30 words):
+RISK_GAUGE: [insight about overall risk level]
+ANALYTICS: [insight about portfolio vs benchmark]
+CORRELATION: [insight about asset diversification]""")
+            ])
+
+            text = response.content.strip()
+            result = {}
+            for line in text.split('\n'):
+                line = line.strip()
+                if line.startswith('RISK_GAUGE:'):
+                    result['risk_gauge'] = line.replace('RISK_GAUGE:', '').strip()
+                elif line.startswith('ANALYTICS:'):
+                    result['advanced_analytics'] = line.replace('ANALYTICS:', '').strip()
+                elif line.startswith('CORRELATION:'):
+                    result['asset_correlation'] = line.replace('CORRELATION:', '').strip()
+
+            if len(result) == 3:
+                logger.info("Dashboard explanations generated via LLM.")
+                return result
+            else:
+                logger.warning("LLM response parsing incomplete. Using fallback.")
+                return self._fallback_dashboard_explanations(risk_class, features, portfolio_return, benchmark_return)
+
+        except Exception as e:
+            logger.error(f"Dashboard explanations LLM call failed: {e}. Using fallback.")
+            return self._fallback_dashboard_explanations(risk_class, features, portfolio_return, benchmark_return)
+
 
 # Backward-compatible alias so existing imports still work
 MockLLMAgent = LLMAgent
