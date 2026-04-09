@@ -12,3 +12,6 @@ pydantic
 uvicorn
 python-dotenv
 langchain-groq
+plotly
+seaborn
+matplotlib
