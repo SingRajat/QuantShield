@@ -6,6 +6,7 @@ from typing import List, Dict, Any
 import joblib
 import numpy as np
 import pandas as pd
+import yfinance as yf
 
 # Add project root and backend to sys.path to resolve module imports
 project_root = Path(__file__).resolve().parent.parent.parent.parent
@@ -28,6 +29,7 @@ class PortfolioRequest(BaseModel):
     etf_name: str
     reporting_date: str
     holdings: List[Holding]
+    benchmark: str = "^NSEI"
 
 # Preload model at startup
 model_path = project_root / 'backend' / 'src' / 'models' / 'saved_model.pkl'
@@ -37,6 +39,10 @@ try:
     print(f"Model loaded successfully from {model_path}")
 except Exception as e:
     print(f"Failed to load SKLearn model from {model_path}: {e}")
+
+@app.get("/api/v1/risk/health")
+async def health_check():
+    return {"status": "ok", "model_loaded": sklearn_model is not None}
 
 @app.post("/api/v1/risk/predict")
 async def predict_risk(request: PortfolioRequest):
@@ -129,14 +135,63 @@ async def predict_risk(request: PortfolioRequest):
         X_infer = ml_features[features_order]
         prediction = sklearn_model.predict(X_infer)[0]
         
-        # 7. LLM Explanation Layer
+        # 7. Risk Score — maps risk class to a 0-10 gauge, adjusted by model confidence
+        proba = sklearn_model.predict_proba(X_infer)[0]
+        class_scores = {"Low": 2, "Medium": 5, "High": 8}
+        confidence = float(max(proba))
+        risk_score = min(10, max(0, class_scores.get(prediction, 5) + (confidence - 0.5) * 4))
+        
+        # 8. Chart data — Portfolio cumulative returns
+        portfolio_cum = ((1 + inference_returns).cumprod() - 1).tolist()
+        
+        # 9. Benchmark data for comparison chart
+        benchmark_ticker = request.benchmark
+        try:
+            bm_raw = yf.download(
+                benchmark_ticker,
+                start=start_date,
+                end=end_date + pd.Timedelta(days=1),
+                progress=False
+            )
+            if bm_raw.empty:
+                benchmark_cum = [0.0] * len(inference_returns)
+            else:
+                if isinstance(bm_raw.columns, pd.MultiIndex):
+                    price_levels = bm_raw.columns.get_level_values(0).unique()
+                    if 'Adj Close' in price_levels:
+                        bm_prices = bm_raw.xs('Adj Close', axis=1, level=0)
+                    else:
+                        bm_prices = bm_raw.xs('Close', axis=1, level=0)
+                else:
+                    if 'Adj Close' in bm_raw.columns:
+                        bm_prices = bm_raw[['Adj Close']]
+                    else:
+                        bm_prices = bm_raw[['Close']]
+                
+                bm_prices = bm_prices.reindex(inference_returns.index).ffill().bfill()
+                bm_daily = bm_prices.pct_change().fillna(0)
+                benchmark_cum = ((1 + bm_daily).cumprod() - 1).iloc[:, 0].tolist()
+        except Exception:
+            benchmark_cum = [0.0] * len(inference_returns)
+        
+        # 10. Component returns for correlation heatmap
+        returns_data = component_returns.to_dict(orient="list")
+        
+        # 11. LLM Explanation Layer
         agent = MockLLMAgent()
-        explanation = agent.generate_explanation(prediction, features_dict)
+        dashboard_explanations = agent.generate_dashboard_explanations(
+            prediction, features_dict, portfolio_cum[-1], benchmark_cum[-1]
+        )
         
         return {
             "risk_class": prediction,
             "metrics": features_dict,
-            "explanation": explanation
+            "dashboard_explanations": dashboard_explanations,
+            "portfolio_returns": portfolio_cum,
+            "benchmark_returns": benchmark_cum,
+            "benchmark_name": benchmark_ticker,
+            "returns_data": returns_data,
+            "risk_score": risk_score
         }
         
     except Exception as e:
