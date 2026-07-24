@@ -17,7 +17,7 @@ class RiskFeatureEngineer:
     
     TRADING_DAYS_PER_YEAR = 252
 
-    def __init__(self, portfolio_returns: pd.Series, component_returns: pd.DataFrame = None, weights: Dict[str, float] = None):
+    def __init__(self, portfolio_returns: pd.Series, component_returns: pd.DataFrame = None, weights: Dict[str, float] = None, market_returns: pd.Series = None):
         """
         Initializes the engineer.
         
@@ -25,6 +25,7 @@ class RiskFeatureEngineer:
             portfolio_returns (pd.Series): The daily returns of the portfolio.
             component_returns (pd.DataFrame): Daily returns of the individual assets (needed for Diversification Ratio).
             weights (Dict[str, float]): The normalized weights of the assets in the portfolio (needed for Diversification Ratio).
+            market_returns (pd.Series): The daily returns of the market benchmark (needed for Beta).
         """
         if portfolio_returns.empty:
             raise ValueError("Provided portfolio_returns is empty.")
@@ -32,6 +33,7 @@ class RiskFeatureEngineer:
         self.portfolio_returns = portfolio_returns
         self.component_returns = component_returns
         self.weights = weights
+        self.market_returns = market_returns
         
     def compute_annualized_volatility(self) -> float:
         """
@@ -91,18 +93,64 @@ class RiskFeatureEngineer:
         diversification_ratio = weighted_avg_vol / portfolio_vol
         return float(diversification_ratio)
 
+    def compute_skewness(self) -> float:
+        return float(self.portfolio_returns.skew())
+
+    def compute_kurtosis(self) -> float:
+        return float(self.portfolio_returns.kurtosis())
+
+    def compute_rolling_vol(self, window: int) -> float:
+        if len(self.portfolio_returns) < window:
+            return np.nan
+        daily_vol = self.portfolio_returns.tail(window).std()
+        return float(daily_vol * np.sqrt(self.TRADING_DAYS_PER_YEAR))
+
+    def compute_sharpe_ratio(self) -> float:
+        vol = self.portfolio_returns.std()
+        if vol == 0:
+            return 0.0
+        return float((self.portfolio_returns.mean() / vol) * np.sqrt(self.TRADING_DAYS_PER_YEAR))
+
+    def compute_sortino_ratio(self) -> float:
+        downside_returns = self.portfolio_returns[self.portfolio_returns < 0]
+        downside_vol = downside_returns.std()
+        if pd.isna(downside_vol) or downside_vol == 0:
+            return 0.0
+        return float((self.portfolio_returns.mean() / downside_vol) * np.sqrt(self.TRADING_DAYS_PER_YEAR))
+
+    def compute_beta(self) -> float:
+        if self.market_returns is None or len(self.market_returns) != len(self.portfolio_returns):
+            return 1.0
+        
+        aligned = pd.concat([self.portfolio_returns, self.market_returns], axis=1).dropna()
+        if len(aligned) < 2:
+             return 1.0
+        cov = aligned.iloc[:, 0].cov(aligned.iloc[:, 1])
+        var_market = aligned.iloc[:, 1].var()
+        if var_market == 0:
+            return 1.0
+        return float(cov / var_market)
+
     def compute_all_features(self) -> Dict[str, float]:
         """
-        Computes all 4 allowed risk features and returns them as a dictionary.
+        Computes all risk features and returns them as a dictionary.
         """
         features = {
             "Annualized_Volatility": self.compute_annualized_volatility(),
             "Historical_VaR_95": self.compute_historical_var_95(),
-            "Maximum_Drawdown": self.compute_max_drawdown()
+            "Maximum_Drawdown": self.compute_max_drawdown(),
+            "Skewness": self.compute_skewness(),
+            "Kurtosis": self.compute_kurtosis(),
+            "RollingVol20": self.compute_rolling_vol(20),
+            "RollingVol60": self.compute_rolling_vol(60),
+            "Sharpe": self.compute_sharpe_ratio(),
+            "Sortino": self.compute_sortino_ratio(),
+            "Beta": self.compute_beta()
         }
         
-        # Only add Diversification Ratio if dependencies are met
         if self.component_returns is not None and self.weights is not None:
              features["Diversification_Ratio"] = self.compute_diversification_ratio()
+        else:
+             features["Diversification_Ratio"] = 1.0
              
         return features

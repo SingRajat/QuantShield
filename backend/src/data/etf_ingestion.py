@@ -106,7 +106,7 @@ class ETFDataFetcher:
             # Validate all requested tickers returned columns
             missing_tickers = [t for t in tickers_to_fetch if t not in df.columns]
             if missing_tickers:
-                 raise ValueError(f"Failed to fetch data for these expected tickers: {missing_tickers}")
+                 raise ValueError(f"Failed to fetch data for these expected tickers: {missing_tickers}. Please check for typos or delisted symbols.")
 
             # Data Integrity: Forward fill holidays/weekends, backward fill missing starting prices
             df = df.ffill().bfill()
