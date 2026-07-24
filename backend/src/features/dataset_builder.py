@@ -13,7 +13,7 @@ class DatasetBuilder:
     between training and inference pipelines.
     """
     
-    WINDOW_LENGTH = 126  # ~6 months (trading days)
+    WINDOW_LENGTH = 252  # ~1 year (trading days)
     STEP_SIZE = 21       # ~1 month (trading days)
     
     def __init__(self, portfolios: Dict[str, pd.DataFrame], component_returns_dict: Dict[str, pd.DataFrame] = None, weights_dict: Dict[str, Dict[str, float]] = None):
@@ -35,9 +35,37 @@ class DatasetBuilder:
         self.component_returns_dict = component_returns_dict or {}
         self.weights_dict = weights_dict or {}
         
-        # Use first portfolio's Daily_Return as a market proxy for Beta calculation
+        # Fetch real benchmark (NIFTY 50) for Beta calculation
         first_portfolio = list(self.portfolios.keys())[0]
-        self.market_proxy = self.portfolios[first_portfolio]['Daily_Return'].dropna()
+        first_df = self.portfolios[first_portfolio]
+        start_date = first_df.index.min()
+        end_date = first_df.index.max() + pd.Timedelta(days=1)
+        
+        try:
+            import yfinance as yf
+            bm_raw = yf.download('^NSEI', start=start_date, end=end_date, progress=False)
+            if not bm_raw.empty:
+                if isinstance(bm_raw.columns, pd.MultiIndex):
+                    price_levels = bm_raw.columns.get_level_values(0).unique()
+                    if 'Adj Close' in price_levels:
+                         bm_prices = bm_raw.xs('Adj Close', axis=1, level=0)
+                    else:
+                         bm_prices = bm_raw.xs('Close', axis=1, level=0)
+                else:
+                    if 'Adj Close' in bm_raw.columns:
+                         bm_prices = bm_raw[['Adj Close']]
+                    else:
+                         bm_prices = bm_raw[['Close']]
+                
+                # Align to our trading days and calculate daily return
+                bm_prices = bm_prices.reindex(first_df.index).ffill().bfill()
+                self.market_proxy = bm_prices.pct_change().iloc[:, 0].fillna(0)
+            else:
+                logger.warning("Failed to download benchmark data. Beta will default to 1.0.")
+                self.market_proxy = None
+        except Exception as e:
+            logger.warning(f"Error downloading benchmark for training: {e}")
+            self.market_proxy = None
         
     def _assign_risk_label(self, vol: float, var95: float, max_dd: float, div_ratio: float = 1.0, 
                            skewness: float = 0.0, kurtosis: float = 0.0, 
@@ -80,8 +108,8 @@ class DatasetBuilder:
         composite_score = composite_score * (1.0 + (0.15 * norm_div_penalty))
         
         # Base logical cutoff thresholds
-        low_threshold = 0.35
-        high_threshold = 0.65
+        low_threshold = 0.45
+        high_threshold = 0.55
 
         # Introduce realistic "fuzziness" (overlap) at the boundaries 
         if composite_score < low_threshold:
