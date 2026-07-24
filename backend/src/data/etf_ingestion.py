@@ -82,17 +82,21 @@ class ETFDataFetcher:
             if data.empty:
                 raise ValueError("Downloaded data is completely empty. Please verify tickers.")
             
-            # Extract 'Adj Close'
+            # Extract 'Adj Close' or 'Close' robustly
             if isinstance(data.columns, pd.MultiIndex):
-                # yfinance >= 0.2.x returns MultiIndex
-                price_level = data.columns.get_level_values(0).unique()
-                if 'Adj Close' in price_level:
-                    df = data.xs('Adj Close', axis=1, level=0)
-                elif 'Close' in price_level:
-                    df = data.xs('Close', axis=1, level=0)
-                    logger.warning("Falling back to 'Close'. 'Adj Close' not found.")
+                df_adj = data.xs('Adj Close', axis=1, level=0) if 'Adj Close' in data.columns.get_level_values(0) else pd.DataFrame()
+                df_close = data.xs('Close', axis=1, level=0) if 'Close' in data.columns.get_level_values(0) else pd.DataFrame()
+                
+                adj_valid_cols = df_adj.dropna(axis=1, how='all').shape[1] if not df_adj.empty else 0
+                close_valid_cols = df_close.dropna(axis=1, how='all').shape[1] if not df_close.empty else 0
+                
+                if adj_valid_cols >= close_valid_cols and adj_valid_cols > 0:
+                    df = df_adj
+                elif close_valid_cols > 0:
+                    df = df_close
+                    logger.warning("Using 'Close' instead of 'Adj Close' due to missing data.")
                 else:
-                    raise ValueError("Neither 'Adj Close' nor 'Close' found in downloaded data.")
+                    raise ValueError("Neither 'Adj Close' nor 'Close' returned valid data.")
             else:
                 # Fallback for single ticker
                 if 'Adj Close' in data.columns:
@@ -103,10 +107,20 @@ class ETFDataFetcher:
                 else:
                     raise ValueError("Neither 'Adj Close' nor 'Close' found in downloaded data.")
             
-            # Validate all requested tickers returned columns
-            missing_tickers = [t for t in tickers_to_fetch if t not in df.columns]
+            # Handle missing or delisted tickers gracefully
+            missing_tickers = [t for t in tickers_to_fetch if t not in df.columns or df[t].isna().all()]
             if missing_tickers:
-                 raise ValueError(f"Failed to fetch data for these expected tickers: {missing_tickers}. Please check for typos or delisted symbols.")
+                 logger.warning(f"Failed to fetch data for {missing_tickers}. Dropping them and re-normalizing weights.")
+                 df = df.drop(columns=[t for t in missing_tickers if t in df.columns])
+                 for t in missing_tickers:
+                     if t in weights:
+                         del weights[t]
+                 if not weights:
+                     raise ValueError("All requested tickers failed to download or are delisted.")
+                 
+                 # Re-normalize weights
+                 total_w = sum(weights.values())
+                 weights = {t: w / total_w for t, w in weights.items()}
 
             # Data Integrity: Forward fill holidays/weekends, backward fill missing starting prices
             df = df.ffill().bfill()
