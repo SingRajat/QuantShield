@@ -111,6 +111,9 @@ class RiskClassifier:
             fold_reports.append(report)
             
             logger.info(f"Fold {fold+1} Accuracy: {accuracy:.4f}")
+            if fold == n_splits - 1:
+                # Print classification report for the final fold
+                logger.info(f"\nClassification Report (Fold {fold+1}):\n" + classification_report(y_test, y_pred))
             
         # 4. Final Training on Full Dataset 
         # (Optional but standard: Train on all data before serving in production)
@@ -145,5 +148,18 @@ class RiskClassifier:
         # Ensure ordered features align with training
         X = features_df[self.FEATURES]
         predictions = self.model.predict(X)
-        
         return predictions
+
+if __name__ == "__main__":
+    from pathlib import Path
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    
+    project_root = Path(__file__).resolve().parent.parent.parent.parent
+    dataset_path = project_root / 'backend' / 'src' / 'models' / 'training_dataset.csv'
+    
+    if dataset_path.exists():
+        df = pd.read_csv(dataset_path)
+        classifier = RiskClassifier()
+        classifier.train_and_evaluate(df, n_splits=5)
+    else:
+        print(f"Dataset not found at {dataset_path}. Please run train_model.py first.")
