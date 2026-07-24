@@ -76,23 +76,56 @@ async def predict_risk(request: PortfolioRequest):
         builder = PortfolioBuilder(price_data=price_data)
         portfolio_df = builder.build_portfolio(weights)
         
-        # 4. Slice inference window (e.g. recent 6 months ~ 126 trading days)
+        # 4. Slice inference window (e.g. recent 1 year ~ 252 trading days)
         daily_returns = portfolio_df['Daily_Return'].dropna()
-        if len(daily_returns) < 126:
-             raise ValueError(f"Insufficient data: {len(daily_returns)} days fetched, required 126.")
+        if len(daily_returns) < 252:
+             raise ValueError(f"Insufficient data: {len(daily_returns)} days fetched, required 252.")
              
-        inference_returns = daily_returns.iloc[-126:]
+        inference_returns = daily_returns.iloc[-252:]
         
         # Slice component returns for diversification score
         start_date = inference_returns.index[0]
         end_date = inference_returns.index[-1]
         component_returns = builder.daily_returns.loc[start_date:end_date]
         
+        # Fetch Benchmark data for Beta calculation and comparison chart
+        benchmark_ticker = request.benchmark
+        benchmark_cum = [0.0] * len(inference_returns)
+        market_returns = None
+        try:
+            bm_raw = yf.download(
+                benchmark_ticker,
+                start=start_date,
+                end=end_date + pd.Timedelta(days=1),
+                progress=False
+            )
+            if not bm_raw.empty:
+                if isinstance(bm_raw.columns, pd.MultiIndex):
+                    price_levels = bm_raw.columns.get_level_values(0).unique()
+                    if 'Adj Close' in price_levels:
+                        bm_prices = bm_raw.xs('Adj Close', axis=1, level=0)
+                    else:
+                        bm_prices = bm_raw.xs('Close', axis=1, level=0)
+                else:
+                    if 'Adj Close' in bm_raw.columns:
+                        bm_prices = bm_raw[['Adj Close']]
+                    else:
+                        bm_prices = bm_raw[['Close']]
+                
+                bm_prices = bm_prices.reindex(inference_returns.index).ffill().bfill()
+                bm_daily = bm_prices.pct_change().fillna(0)
+                market_returns = bm_daily.iloc[:, 0]
+                benchmark_cum = ((1 + bm_daily).cumprod() - 1).iloc[:, 0].tolist()
+        except Exception as e:
+            print(f"Error fetching benchmark: {e}")
+            pass
+        
         # 5. Statistical computation
         engineer = RiskFeatureEngineer(
             portfolio_returns=inference_returns,
             component_returns=component_returns,
-            weights=weights
+            weights=weights,
+            market_returns=market_returns
         )
         
         features_dict = engineer.compute_all_features()
@@ -144,35 +177,7 @@ async def predict_risk(request: PortfolioRequest):
         # 8. Chart data — Portfolio cumulative returns
         portfolio_cum = ((1 + inference_returns).cumprod() - 1).tolist()
         
-        # 9. Benchmark data for comparison chart
-        benchmark_ticker = request.benchmark
-        try:
-            bm_raw = yf.download(
-                benchmark_ticker,
-                start=start_date,
-                end=end_date + pd.Timedelta(days=1),
-                progress=False
-            )
-            if bm_raw.empty:
-                benchmark_cum = [0.0] * len(inference_returns)
-            else:
-                if isinstance(bm_raw.columns, pd.MultiIndex):
-                    price_levels = bm_raw.columns.get_level_values(0).unique()
-                    if 'Adj Close' in price_levels:
-                        bm_prices = bm_raw.xs('Adj Close', axis=1, level=0)
-                    else:
-                        bm_prices = bm_raw.xs('Close', axis=1, level=0)
-                else:
-                    if 'Adj Close' in bm_raw.columns:
-                        bm_prices = bm_raw[['Adj Close']]
-                    else:
-                        bm_prices = bm_raw[['Close']]
-                
-                bm_prices = bm_prices.reindex(inference_returns.index).ffill().bfill()
-                bm_daily = bm_prices.pct_change().fillna(0)
-                benchmark_cum = ((1 + bm_daily).cumprod() - 1).iloc[:, 0].tolist()
-        except Exception:
-            benchmark_cum = [0.0] * len(inference_returns)
+        # 9. Benchmark data was fetched earlier in Step 4.5
         
         # 10. Component returns for correlation heatmap
         returns_data = component_returns.to_dict(orient="list")
