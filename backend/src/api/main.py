@@ -53,11 +53,11 @@ class PortfolioRequest(BaseModel):
 # Preload model at startup
 model_path = project_root / 'backend' / 'src' / 'models' / 'saved_model.cbm'
 sklearn_model = None
-        try:
-            sklearn_model = CatBoostClassifier()
+try:
+    sklearn_model = CatBoostClassifier()
     sklearn_model.load_model(str(model_path))
     print(f"CatBoost model loaded successfully from {model_path}")
-        except Exception as e:
+except Exception as e:
     print(f"Failed to load CatBoost model from {model_path}: {e}")
 
 @app.get("/")
