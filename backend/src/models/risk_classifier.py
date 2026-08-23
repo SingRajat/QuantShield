@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 import logging
 from typing import Dict, Any, Tuple
-from sklearn.ensemble import RandomForestClassifier
+from catboost import CatBoostClassifier
 from sklearn.metrics import classification_report, accuracy_score
 from sklearn.model_selection import TimeSeriesSplit
 
@@ -37,12 +37,11 @@ class RiskClassifier:
         Args:
             random_state (int): Seed for reproducibility of the Random Forest model.
         """
-        self.model = RandomForestClassifier(
-            n_estimators=200,
-            min_samples_leaf=10,
-            max_depth=12,
-            random_state=random_state,
-            class_weight=None  # Handle potential class imbalances
+        self.model = CatBoostClassifier(
+            iterations=200,
+            depth=6,
+            random_seed=random_state,
+            verbose=0
         )
         self.is_trained = False
         
