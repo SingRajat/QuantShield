@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 venv/
 .env
+*.md
 
 # Models and Generated Datasets
 backend/src/models/saved_model.pkl
