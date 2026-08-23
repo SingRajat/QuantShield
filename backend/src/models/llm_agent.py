@@ -23,7 +23,7 @@ class LLMAgent:
       - Falls back to a deterministic template if the API call fails or key is missing.
     """
 
-    MODEL = "llama-3.3-70b-versatile"
+    MODEL = "groq/compound"
 
     def __init__(self):
         self.api_key = os.getenv("GROQ_API_KEY")
