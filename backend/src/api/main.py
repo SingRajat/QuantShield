@@ -3,10 +3,15 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 from typing import List, Dict, Any
-import joblib
+from catboost import CatBoostClassifier
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+from dotenv import load_dotenv
+
+# Load environment variables (.env)
+load_dotenv()
 
 # Add project root and backend to sys.path to resolve module imports
 project_root = Path(__file__).resolve().parent.parent.parent.parent
@@ -32,13 +37,14 @@ class PortfolioRequest(BaseModel):
     benchmark: str = "^NSEI"
 
 # Preload model at startup
-model_path = project_root / 'backend' / 'src' / 'models' / 'saved_model.pkl'
+model_path = project_root / 'backend' / 'src' / 'models' / 'saved_model.cbm'
 sklearn_model = None
 try:
-    sklearn_model = joblib.load(model_path)
-    print(f"Model loaded successfully from {model_path}")
+    sklearn_model = CatBoostClassifier()
+    sklearn_model.load_model(str(model_path))
+    print(f"CatBoost model loaded successfully from {model_path}")
 except Exception as e:
-    print(f"Failed to load SKLearn model from {model_path}: {e}")
+    print(f"Failed to load CatBoost model from {model_path}: {e}")
 
 @app.get("/api/v1/risk/health")
 async def health_check():
@@ -166,13 +172,39 @@ async def predict_risk(request: PortfolioRequest):
         ]
         
         X_infer = ml_features[features_order]
-        prediction = sklearn_model.predict(X_infer)[0]
+        prediction = str(sklearn_model.predict(X_infer).ravel()[0])
         
-        # 7. Risk Score — maps risk class to a 0-10 gauge, adjusted by model confidence
-        proba = sklearn_model.predict_proba(X_infer)[0]
-        class_scores = {"Low": 2, "Medium": 5, "High": 8}
-        confidence = float(max(proba))
-        risk_score = min(10, max(0, class_scores.get(prediction, 5) + (confidence - 0.5) * 4))
+        # 7. Risk Score — composite score used to position within CatBoost's tier band
+        vol = float(features_dict.get("Annualized_Volatility", 0))
+        var95 = float(features_dict.get("Historical_VaR_95", 0))
+        max_dd = float(features_dict.get("Maximum_Drawdown", 0))
+        div_ratio = float(features_dict.get("Diversification_Ratio", 1.0))
+        skewness = float(features_dict.get("Skewness", 0) or 0)
+        kurtosis_val = float(features_dict.get("Kurtosis", 0) or 0)
+        beta_val = float(features_dict.get("Beta", 1.0) or 1.0)
+        sortino_val = float(features_dict.get("Sortino", 0) or 0)
+        
+        norm_vol = min(vol / 0.25, 1.0)
+        norm_var = min(var95 / 0.05, 1.0)
+        norm_dd = min(max_dd / 0.30, 1.0)
+        norm_div_penalty = 1.0 - min(max(div_ratio - 1.0, 0), 1.0)
+        norm_skew_penalty = min(abs(min(skewness, 0)) / 2.0, 1.0)
+        norm_kurt_penalty = min(max(kurtosis_val, 0) / 5.0, 1.0)
+        norm_beta_penalty = min(max(beta_val - 1.0, 0) / 0.5, 1.0)
+        norm_sortino_penalty = 1.0 - min(max(sortino_val, 0) / 2.0, 1.0)
+        
+        core_score = (0.25 * norm_vol) + (0.35 * norm_var) + (0.15 * norm_dd)
+        tail_score = (0.10 * norm_skew_penalty) + (0.05 * norm_kurt_penalty) + (0.05 * norm_beta_penalty) + (0.05 * norm_sortino_penalty)
+        composite = min(1.0, (core_score + tail_score) * (1.0 + (0.15 * norm_div_penalty)))
+        
+        # Map composite (0-1) into the CatBoost tier's band for gauge alignment
+        if prediction == "Low":
+            risk_score = round(0.0 + 3.33 * composite, 2)       # 0.00 – 3.33
+        elif prediction == "Medium":
+            risk_score = round(3.34 + 3.32 * composite, 2)      # 3.34 – 6.66
+        else:
+            risk_score = round(6.67 + 3.33 * composite, 2)      # 6.67 – 10.0
+        risk_score = min(10.0, risk_score)
         
         # 8. Chart data — Portfolio cumulative returns
         portfolio_cum = ((1 + inference_returns).cumprod() - 1).tolist()
