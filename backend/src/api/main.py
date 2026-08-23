@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 # Load environment variables (.env)
@@ -24,7 +25,20 @@ from backend.src.features.risk_metrics import RiskFeatureEngineer
 from backend.src.models.llm_agent import MockLLMAgent
 from backend.src.models.risk_classifier import RiskClassifier
 
-app = FastAPI(title="QuantShield Risk API")
+app = FastAPI(
+    title="QuantShield Risk API",
+    description="Institutional-grade ETF portfolio risk classification and metric computation engine.",
+    version="1.0.0"
+)
+
+# Enable CORS for all origins (Streamlit Cloud, local, mobile, etc.)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 class Holding(BaseModel):
     ticker: str
@@ -39,12 +53,21 @@ class PortfolioRequest(BaseModel):
 # Preload model at startup
 model_path = project_root / 'backend' / 'src' / 'models' / 'saved_model.cbm'
 sklearn_model = None
-try:
-    sklearn_model = CatBoostClassifier()
+        try:
+            sklearn_model = CatBoostClassifier()
     sklearn_model.load_model(str(model_path))
     print(f"CatBoost model loaded successfully from {model_path}")
-except Exception as e:
+        except Exception as e:
     print(f"Failed to load CatBoost model from {model_path}: {e}")
+
+@app.get("/")
+async def root():
+    return {
+        "status": "online",
+        "service": "QuantShield Risk Engine API",
+        "docs_url": "/docs",
+        "health_check": "/api/v1/risk/health"
+    }
 
 @app.get("/api/v1/risk/health")
 async def health_check():
@@ -57,7 +80,7 @@ async def predict_risk(request: PortfolioRequest):
         
     try:
         # 1. Validate Weights 
-        total_weight = sum([h.weight for h in request.holdings])
+        total_weight = sum([h.weight for h in sanitized_holdings])
         if not (0.95 <= total_weight <= 1.05):
             raise HTTPException(status_code=400, detail=f"Portfolio weights must sum to ~1.0. Provided sum: {total_weight:.4f}")
             
@@ -65,7 +88,7 @@ async def predict_risk(request: PortfolioRequest):
         holdings_input = {
             "etf_name": request.etf_name,
             "reporting_date": request.reporting_date,
-            "holdings": [{"ticker": h.ticker, "weight": h.weight} for h in request.holdings]
+            "holdings": [{"ticker": h.ticker, "weight": h.weight} for h in sanitized_holdings]
         }
         
         # 3. Ingestion pipeline (fetch 5 years of data for consistency with training horizon)
