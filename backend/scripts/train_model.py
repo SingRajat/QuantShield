@@ -122,9 +122,9 @@ def main():
     model_dir = project_root / 'backend' / 'src' / 'models'
     model_dir.mkdir(parents=True, exist_ok=True)
     
-    model_path = model_dir / 'saved_model.pkl'
-    joblib.dump(classifier.model, model_path)
-    logger.info(f"Serialized trained SKLearn model to: {model_path}")
+    model_path = model_dir / 'saved_model.cbm'
+    classifier.model.save_model(str(model_path))
+    logger.info(f"Serialized trained CatBoost model to: {model_path}")
     
     logger.info("End-to-End Pipeline Validation was completed successfully.")
 

@@ -1,7 +1,7 @@
 import os
 import sys
 import argparse
-import joblib
+import catboost from CatBoostClassifier
 import logging
 from pathlib import Path
 from sklearn.metrics import classification_report, accuracy_score
@@ -56,13 +56,14 @@ def main():
     logger.info("Starting Evaluation on Unseen Test Dataset...")
 
     # 1. Load the Pre-Trained Model
-    model_path = project_root / 'backend' / 'src' / 'models' / 'saved_model.pkl'
+    model_path = project_root / 'backend' / 'src' / 'models' / 'saved_model.cbm'
     if not model_path.exists():
         logger.error(f"Cannot find the trained model at: {model_path}")
         return
         
-    classifier_model = joblib.load(model_path)
-    logger.info(f"Loaded trained SKLearn model from: {model_path}")
+    classifier_model = CatBoostClassifier()
+    classifier_model.load_model(str(model_path))
+    logger.info(f"Loaded trained CatBoost model from: {model_path}")
 
     # 2. Ingestion Phase for Unseen Data
     fetcher = ETFDataFetcher(years=5)
@@ -125,7 +126,7 @@ def main():
     y_actual = unseen_df['Label']
     
     # Predict without seeing the actual labels!
-    y_pred = classifier_model.predict(X_unseen)
+    y_pred = classifier_model.predict(X_unseen).flatten()
     
     accuracy = accuracy_score(y_actual, y_pred)
     report = classification_report(y_actual, y_pred)
