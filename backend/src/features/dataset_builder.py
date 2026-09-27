@@ -1,152 +1,128 @@
 import pandas as pd
 import numpy as np
 import logging
-from typing import Dict, List, Tuple
-try:
-    from backend.src.features.risk_metrics import RiskFeatureEngineer
-except ImportError:
-    from src.features.risk_metrics import RiskFeatureEngineer
+from typing import Dict, Tuple, Optional, List
 
 logger = logging.getLogger(__name__)
 
 class DatasetBuilder:
     """
-    Builds a Panel Dataset using rolling windows for ML classification.
-    Operates on reconstructed portfolio returns to maintain architectural consistency
-    between training and inference pipelines.
+    Builds a Panel Dataset using rolling windows for continuous risk forecasting.
+    Produces temporal lagged features for Volatility and Maximum Drawdown.
     """
     
-    WINDOW_LENGTH = 252  # ~1 year (trading days)
-    STEP_SIZE = 21       # ~1 month (trading days)
+    WINDOW_LENGTH = 252   # ~1 year lookback (trading days)
+    FORECAST_HORIZON = 21 # ~1 month forward horizon (trading days)
+    STEP_SIZE = 21        # ~1 month rolling step
+    LAGS = [0, 5, 21, 63] # Lags to compute features at (0 is t)
     
-    def __init__(self, portfolios: Dict[str, pd.DataFrame], component_returns_dict: Dict[str, pd.DataFrame] = None, weights_dict: Dict[str, Dict[str, float]] = None):
+    FEATURE_SETS = {
+        "v1_baseline": [
+            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
+            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63"
+        ],
+        "family_a": [
+            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
+            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63"
+        ],
+        "family_b": [
+            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
+            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63",
+            "Delta_Vol_5", "Delta_Vol_21", "Delta_Vol_63",
+            "Vol_Ratio_21_63",
+            "Delta_MaxDD_5", "Delta_MaxDD_21", "Delta_MaxDD_63"
+        ],
+        "v1_1": [
+            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
+            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63",
+            "Delta_Vol_5", "Delta_Vol_21", "Delta_Vol_63",
+            "Vol_Ratio_21_63",
+            "Delta_MaxDD_5", "Delta_MaxDD_21", "Delta_MaxDD_63"
+        ],
+        "family_b_ewma": [
+            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
+            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63",
+            "Delta_Vol_5", "Delta_Vol_21", "Delta_Vol_63",
+            "Vol_Ratio_21_63",
+            "Delta_MaxDD_5", "Delta_MaxDD_21", "Delta_MaxDD_63",
+            "EWMA_Vol_t"
+        ],
+        "family_b_plus_ewma": [
+            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
+            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63",
+            "Delta_Vol_5", "Delta_Vol_21", "Delta_Vol_63",
+            "Vol_Ratio_21_63",
+            "Delta_MaxDD_5", "Delta_MaxDD_21", "Delta_MaxDD_63",
+            "EWMA_Vol_t"
+        ]
+    }
+
+    def __init__(
+        self, 
+        portfolios: Dict[str, pd.DataFrame], 
+        feature_set: str = "v1_baseline",
+        **kwargs # Accept legacy kwargs to avoid breaking existing imports/calls during transition
+    ):
         """
         Initializes the DatasetBuilder with reconstructed portfolio returns.
         
         Args:
-            portfolios (Dict[str, pd.DataFrame]): A mapping from a portfolio identifier (e.g., ETF ticker or Portfolio ID)
+            portfolios (Dict[str, pd.DataFrame]): A mapping from a portfolio identifier (e.g., ETF ticker)
                                                   to its reconstructed returns DataFrame (must contain 'Daily_Return').
-            component_returns_dict (Dict[str, pd.DataFrame]): Mapping from portfolio ID to its component returns DataFrame.
-                                                              Required for Diversification Ratio.
-            weights_dict (Dict[str, Dict[str, float]]): Mapping from portfolio ID to its asset weights.
-                                                        Required for Diversification Ratio.
+            feature_set (str): Feature set configuration ('v1_baseline' / 'family_a' or 'family_b' / 'v1_1').
         """
         if not portfolios:
             raise ValueError("Provided portfolios dictionary is empty.")
             
         self.portfolios = portfolios
-        self.component_returns_dict = component_returns_dict or {}
-        self.weights_dict = weights_dict or {}
-        
-        # Fetch real benchmark (NIFTY 50) for Beta calculation
-        first_portfolio = list(self.portfolios.keys())[0]
-        first_df = self.portfolios[first_portfolio]
-        start_date = first_df.index.min()
-        end_date = first_df.index.max() + pd.Timedelta(days=1)
-        
-        try:
-            import yfinance as yf
-            bm_raw = yf.download('^NSEI', start=start_date, end=end_date, progress=False)
-            if not bm_raw.empty:
-                if isinstance(bm_raw.columns, pd.MultiIndex):
-                    price_levels = bm_raw.columns.get_level_values(0).unique()
-                    if 'Adj Close' in price_levels:
-                         bm_prices = bm_raw.xs('Adj Close', axis=1, level=0)
-                    else:
-                         bm_prices = bm_raw.xs('Close', axis=1, level=0)
-                else:
-                    if 'Adj Close' in bm_raw.columns:
-                         bm_prices = bm_raw[['Adj Close']]
-                    else:
-                         bm_prices = bm_raw[['Close']]
-                
-                # Align to our trading days and calculate daily return
-                bm_prices = bm_prices.reindex(first_df.index).ffill().bfill()
-                self.market_proxy = bm_prices.pct_change().iloc[:, 0].fillna(0)
-            else:
-                logger.warning("Failed to download benchmark data. Beta will default to 1.0.")
-                self.market_proxy = None
-        except Exception as e:
-            logger.warning(f"Error downloading benchmark for training: {e}")
-            self.market_proxy = None
-        
-    def _assign_risk_label(self, vol: float, var95: float, max_dd: float, div_ratio: float = 1.0, 
-                           skewness: float = 0.0, kurtosis: float = 0.0, 
-                           rolling_vol_20: float = 0.0, rolling_vol_60: float = 0.0,
-                           sharpe: float = 0.0, sortino: float = 0.0, beta: float = 1.0) -> str:
+        self.feature_set = feature_set
+
+    @staticmethod
+    def _compute_vol(returns: pd.Series) -> float:
+        if len(returns) < 5: return np.nan
+        return float(returns.std() * np.sqrt(252))
+
+    @staticmethod
+    def _compute_maxdd(returns: pd.Series) -> float:
+        if len(returns) < 5: return np.nan
+        cum_ret = (1.0 + returns).cumprod()
+        running_max = cum_ret.cummax()
+        drawdown = (cum_ret - running_max) / running_max
+        return float(abs(drawdown.min())) if len(drawdown) > 0 else 0.0
+
+    @staticmethod
+    def _compute_ewma_vol(returns: pd.Series, decay: float = 0.94) -> float:
+        r = returns.dropna().values
+        if len(r) < 5:
+            return np.nan
+        n = len(r)
+        weights = (1.0 - decay) * (decay ** np.arange(n - 1, -1, -1))
+        weights /= weights.sum()
+        ewma_var = np.sum(weights * (r ** 2))
+        return float(np.sqrt(252.0 * ewma_var))
+
+    @staticmethod
+    def compute_forward_target(future_returns: pd.Series) -> Tuple[float, float]:
         """
-        Assigns a Risk Class (Low, Medium, High) using a continuous composite score.
-        Introduces fuzzy boundaries to prevent perfect rule reconstruction by ML models.
+        Computes forward-looking realized risk metrics for regression targets.
         """
-        # Normalize original metrics
-        norm_vol = min(vol / 0.25, 1.0)        # Assume 25% vol is extreme
-        norm_var = min(var95 / 0.05, 1.0)      # Assume 5% daily VaR is extreme
-        norm_dd = min(max_dd / 0.30, 1.0)      # Assume 30% drawdown is extreme
-        # Invert div_ratio (higher ratio = lower risk)
-        norm_div_penalty = 1.0 - min(max(div_ratio - 1.0, 0), 1.0) 
+        fwd_vol = DatasetBuilder._compute_vol(future_returns)
+        fwd_maxdd = DatasetBuilder._compute_maxdd(future_returns)
+        return fwd_vol, fwd_maxdd
 
-        # Normalize new metrics safely with fallbacks if nan
-        safe_skew = 0.0 if pd.isna(skewness) else skewness
-        norm_skew_penalty = min(abs(min(safe_skew, 0)) / 2.0, 1.0) # 0 to 1
-
-        safe_kurt = 0.0 if pd.isna(kurtosis) else kurtosis
-        norm_kurt_penalty = min(max(safe_kurt, 0) / 5.0, 1.0)
-
-        safe_beta = 1.0 if pd.isna(beta) else beta
-        norm_beta_penalty = min(max(safe_beta - 1.0, 0) / 0.5, 1.0)
-
-        safe_sortino = 0.0 if pd.isna(sortino) else sortino
-        norm_sortino_penalty = 1.0 - min(max(safe_sortino, 0) / 2.0, 1.0)
-
-        # Create a non-linear composite risk score (0 to 1)
-        # Weights emphasize severe downside (MaxDD and VaR) over pure Volatility
-        core_score = (0.25 * norm_vol) + (0.35 * norm_var) + (0.15 * norm_dd)
-        
-        # New tail/exposure factors (25% of weight)
-        tail_score = (0.10 * norm_skew_penalty) + (0.05 * norm_kurt_penalty) + (0.05 * norm_beta_penalty) + (0.05 * norm_sortino_penalty)
-        
-        composite_score = core_score + tail_score
-        
-        # Apply diversification penalty as a modifier
-        composite_score = composite_score * (1.0 + (0.15 * norm_div_penalty))
-        
-        # Base logical cutoff thresholds
-        low_threshold = 0.45
-        high_threshold = 0.55
-
-        # Introduce realistic "fuzziness" (overlap) at the boundaries 
-        if composite_score < low_threshold:
-            if max_dd > 0.15 and vol < 0.10: 
-                return "Medium"
-            if safe_beta > 1.5:
-                return "Medium"
-            return "Low"
-            
-        elif composite_score > high_threshold:
-            if div_ratio > 1.8 and vol < 0.25:
-                return "Medium"
-            if safe_sortino > 2.0:
-                return "Medium"
-            return "High"
-            
-        else:
-            if norm_var > 0.8: 
-                 return "High"
-            if composite_score < 0.45 and max_dd < 0.10: 
-                 return "Low"
-            if safe_kurt > 5.0 or safe_skew < -1.5:
-                 return "High"
-            return "Medium"
-
-    def build_panel_dataset(self) -> pd.DataFrame:
+    def build_panel_dataset(self, drop_incomplete: bool = True, feature_set: Optional[str] = None) -> pd.DataFrame:
         """
-        Applies rolling windows to each reconstructed portfolio and computes exactly 4 approved features.
+        Applies rolling windows to each reconstructed portfolio and computes temporal 
+        lag features paired with forward-looking risk targets.
         
         Returns:
             pd.DataFrame: Panel Dataset structured as:
-                          Portfolio_ID | Window_Start | Window_End | Vol | VaR95 | MaxDD | DivRatio | Label
+                          Portfolio_ID | Date_t | Target_Start | Target_End | EWMA_Vol_t |
+                          Vol_t | Vol_t5 | ... | Forward_Vol | Forward_MaxDD
         """
         rows = []
+        max_lag = max(self.LAGS)
+        min_required = self.WINDOW_LENGTH + max_lag + self.FORECAST_HORIZON
         
         for portfolio_id, portfolio_df in self.portfolios.items():
             if 'Daily_Return' not in portfolio_df.columns:
@@ -156,79 +132,166 @@ class DatasetBuilder:
             daily_returns = portfolio_df['Daily_Return'].dropna()
             n_days = len(daily_returns)
             
-            if n_days < self.WINDOW_LENGTH:
-                logger.warning(f"Not enough data for {portfolio_id}. Required: {self.WINDOW_LENGTH}, Available: {n_days}. Skipping.")
-                continue
-                
-            component_returns = self.component_returns_dict.get(portfolio_id)
-            weights = self.weights_dict.get(portfolio_id)
-                
-            # Apply rolling windows
-            for start_idx in range(0, n_days - self.WINDOW_LENGTH + 1, self.STEP_SIZE):
-                end_idx = start_idx + self.WINDOW_LENGTH
-                window_returns = daily_returns.iloc[start_idx:end_idx]
-                
-                window_start = window_returns.index[0]
-                window_end = window_returns.index[-1]
-                
-                # Slice component returns if available
-                window_component_returns = None
-                if component_returns is not None:
-                     # Attempt to slice component returns to match the window
-                     try:
-                         # Ensure alignment by index limits
-                         window_component_returns = component_returns.loc[window_start:window_end]
-                     except Exception as e:
-                         logger.warning(f"Could not slice component returns for {portfolio_id}: {e}")
-                
-                # Slice market proxy for beta calculation
-                window_market_returns = None
-                if self.market_proxy is not None:
-                     try:
-                         window_market_returns = self.market_proxy.loc[window_start:window_end]
-                     except Exception:
-                         pass
-                
-                engineer = RiskFeatureEngineer(
-                    portfolio_returns=window_returns,
-                    component_returns=window_component_returns,
-                    weights=weights,
-                    market_returns=window_market_returns
+            if n_days < min_required:
+                logger.warning(
+                    f"Not enough data for {portfolio_id}. Required: {min_required}, Available: {n_days}. Skipping."
                 )
+                continue
+            
+            # end_idx represents 't' (the boundary between lookback and forward forecast)
+            start_t = self.WINDOW_LENGTH + max_lag
+            max_t = n_days - self.FORECAST_HORIZON
+            
+            for end_idx in range(start_t, max_t + 1, self.STEP_SIZE):
+                future_returns = daily_returns.iloc[end_idx : end_idx + self.FORECAST_HORIZON]
                 
-                features = engineer.compute_all_features()
+                # Verify exact horizon length
+                if len(future_returns) < self.FORECAST_HORIZON:
+                    continue
                 
-                vol = features.get("Annualized_Volatility", np.nan)
-                var95 = features.get("Historical_VaR_95", np.nan)
-                max_dd = features.get("Maximum_Drawdown", np.nan)
-                div_ratio = features.get("Diversification_Ratio", 1.0)
-                skewness = features.get("Skewness", np.nan)
-                kurtosis = features.get("Kurtosis", np.nan)
-                rolling_vol_20 = features.get("RollingVol20", np.nan)
-                rolling_vol_60 = features.get("RollingVol60", np.nan)
-                sharpe = features.get("Sharpe", np.nan)
-                sortino = features.get("Sortino", np.nan)
-                beta = features.get("Beta", np.nan)
+                # The exact date t that separates history from future
+                window_date_t = daily_returns.index[end_idx - 1]
+                target_start = future_returns.index[0]
+                target_end = future_returns.index[-1]
                 
-                label = self._assign_risk_label(vol, var95, max_dd, div_ratio, skewness, kurtosis, rolling_vol_20, rolling_vol_60, sharpe, sortino, beta)
+                # Compute EWMA baseline forecast over the current 252-day lookback [t-252:t]
+                current_lookback_returns = daily_returns.iloc[end_idx - self.WINDOW_LENGTH : end_idx]
+                ewma_vol = self._compute_ewma_vol(current_lookback_returns)
                 
-                rows.append({
+                row = {
                     "Portfolio_ID": portfolio_id,
-                    "Window_Start": window_start,
-                    "Window_End": window_end,
-                    "Vol": vol,
-                    "VaR95": var95,
-                    "MaxDD": max_dd,
-                    "DivRatio": div_ratio,
-                    "Skewness": skewness,
-                    "Kurtosis": kurtosis,
-                    "RollingVol20": rolling_vol_20,
-                    "RollingVol60": rolling_vol_60,
-                    "Sharpe": sharpe,
-                    "Sortino": sortino,
-                    "Beta": beta,
-                    "Label": label
-                })
+                    "Date_t": window_date_t,
+                    "Target_Start": target_start,
+                    "Target_End": target_end,
+                    "EWMA_Vol_t": ewma_vol,
+                }
+                
+                features_valid = True
+                
+                # Compute historical risk at t, t-5, t-21, t-63
+                for lag in self.LAGS:
+                    lag_end = end_idx - lag
+                    lag_start = lag_end - self.WINDOW_LENGTH
+                    
+                    if lag_start < 0:
+                        features_valid = False
+                        break
+                        
+                    lag_returns = daily_returns.iloc[lag_start:lag_end]
+                    
+                    suffix = f"_t{lag}" if lag > 0 else "_t"
+                    vol = self._compute_vol(lag_returns)
+                    maxdd = self._compute_maxdd(lag_returns)
+                    
+                    if pd.isna(vol) or pd.isna(maxdd):
+                        features_valid = False
+                        break
+                        
+                    row[f"Vol{suffix}"] = vol
+                    row[f"MaxDD{suffix}"] = maxdd
+                
+                if drop_incomplete and not features_valid:
+                    continue
+                    
+                fwd_vol, fwd_maxdd = self.compute_forward_target(future_returns)
+                
+                if drop_incomplete and (pd.isna(fwd_vol) or pd.isna(fwd_maxdd)):
+                    continue
+                    
+                row["Forward_Vol"] = fwd_vol
+                row["Forward_MaxDD"] = fwd_maxdd
+                
+                rows.append(row)
                 
         panel_df = pd.DataFrame(rows)
+        active_fs = feature_set or self.feature_set
+        if active_fs in ["family_b", "v1_1", "family_b_ewma", "family_b_plus_ewma"]:
+            panel_df = self.add_family_b_features(panel_df)
         return panel_df
+
+    @staticmethod
+    def add_family_b_features(df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Derives the exactly seven Family B features:
+        - Volatility dynamics:
+            Delta_Vol_5 = Vol_t - Vol_t5
+            Delta_Vol_21 = Vol_t - Vol_t21
+            Delta_Vol_63 = Vol_t - Vol_t63
+        - Relative volatility / regime feature:
+            Vol_Ratio_21_63 = Vol_t / Vol_t63
+        - Drawdown dynamics:
+            Delta_MaxDD_5 = MaxDD_t - MaxDD_t5
+            Delta_MaxDD_21 = MaxDD_t - MaxDD_t21
+            Delta_MaxDD_63 = MaxDD_t - MaxDD_t63
+        """
+        res = df.copy()
+        res["Delta_Vol_5"] = res["Vol_t"] - res["Vol_t5"]
+        res["Delta_Vol_21"] = res["Vol_t"] - res["Vol_t21"]
+        res["Delta_Vol_63"] = res["Vol_t"] - res["Vol_t63"]
+        res["Vol_Ratio_21_63"] = res["Vol_t"] / res["Vol_t63"]
+        res["Delta_MaxDD_5"] = res["MaxDD_t"] - res["MaxDD_t5"]
+        res["Delta_MaxDD_21"] = res["MaxDD_t"] - res["MaxDD_t21"]
+        res["Delta_MaxDD_63"] = res["MaxDD_t"] - res["MaxDD_t63"]
+        return res
+
+    @classmethod
+    def compute_inference_features(
+        cls, 
+        daily_returns: pd.Series, 
+        feature_set: str = "family_b_ewma"
+    ) -> Dict[str, Any]:
+        """
+        Computes the exact feature vector from portfolio daily returns for live inference.
+        Requires at least WINDOW_LENGTH + max(LAGS) = 252 + 63 = 315 trading days.
+        
+        Returns:
+            Dict containing:
+                - 'features_df': pd.DataFrame with 1 row and exactly the model features
+                - 'ewma_vol': float, benchmark EWMA volatility over current lookback
+                - 'feature_values': Dict[str, float]
+        """
+        clean_returns = daily_returns.dropna()
+        n_days = len(clean_returns)
+        if n_days < cls.WINDOW_LENGTH:
+            raise ValueError(
+                f"Insufficient historical data: {n_days} trading days available, "
+                f"at least {cls.WINDOW_LENGTH} required for rolling risk metrics."
+            )
+            
+        min_required = cls.WINDOW_LENGTH + max(cls.LAGS)
+        if n_days < min_required:
+            pad_len = min_required - n_days
+            first_val = float(clean_returns.iloc[0])
+            pad_series = pd.Series([first_val] * pad_len, index=pd.date_range(end=clean_returns.index[0] - pd.Timedelta(days=1), periods=pad_len, freq="B"))
+            clean_returns = pd.concat([pad_series, clean_returns])
+            n_days = len(clean_returns)
+            
+        end_idx = n_days
+        current_lookback_returns = clean_returns.iloc[end_idx - cls.WINDOW_LENGTH : end_idx]
+        ewma_vol = cls._compute_ewma_vol(current_lookback_returns)
+        
+        row = {}
+        for lag in cls.LAGS:
+            lag_end = end_idx - lag
+            lag_start = lag_end - cls.WINDOW_LENGTH
+            lag_returns = clean_returns.iloc[lag_start:lag_end]
+            
+            suffix = f"_t{lag}" if lag > 0 else "_t"
+            row[f"Vol{suffix}"] = cls._compute_vol(lag_returns)
+            row[f"MaxDD{suffix}"] = cls._compute_maxdd(lag_returns)
+        row["EWMA_Vol_t"] = ewma_vol
+        df = pd.DataFrame([row])
+        if feature_set in ["family_b", "v1_1", "family_b_ewma", "family_b_plus_ewma"]:
+            df = cls.add_family_b_features(df)
+            
+        expected_features = cls.FEATURE_SETS.get(feature_set, cls.FEATURE_SETS["family_b_ewma"])
+        df_features = df[expected_features]
+        
+        return {
+            "features_df": df_features,
+            "ewma_vol": float(ewma_vol) if not pd.isna(ewma_vol) else 0.0,
+            "feature_values": {k: float(v) for k, v in df.iloc[0].to_dict().items()}
+        }
+
+
+

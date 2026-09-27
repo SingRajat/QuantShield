@@ -1,7 +1,13 @@
 import pytest
 import pandas as pd
 import numpy as np
-from src.data.etf_ingestion import ETFDataFetcher
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+try:
+    from backend.src.data.etf_ingestion import ETFDataFetcher
+except ImportError:
+    from src.data.etf_ingestion import ETFDataFetcher
 from unittest.mock import patch, MagicMock
 
 @pytest.fixture
@@ -86,11 +92,46 @@ def test_missing_ticker_in_response(mock_download, valid_holdings_input):
     # Mock yfinance only returning data for TCS, skipping INFY
     dates = pd.date_range(start="2020-01-01", periods=5)
     df = pd.DataFrame({'Adj Close': [100, 101, 102, 103, 104]}, index=dates)
-    # yfinance usually returns a normal df for a single valid ticker
     df.columns.name = 'Ticker'
-    
     mock_download.return_value = df
     
     fetcher = ETFDataFetcher()
-    with pytest.raises(ValueError, match="Failed to fetch data for these expected tickers"):
-         fetcher.fetch_data(valid_holdings_input)
+    # Should gracefully drop INFY and re-normalize TCS weight to 1.0
+    result = fetcher.fetch_data(valid_holdings_input)
+    assert "TCS.NS" in result["weights"]
+    assert "INFY.NS" not in result["weights"]
+    assert np.isclose(result["weights"]["TCS.NS"], 1.0)
+    
+    # Should raise ValueError if all tickers fail
+    mock_download.return_value = pd.DataFrame()
+    with pytest.raises(ValueError, match="Downloaded data is completely empty"):
+        fetcher.fetch_data(valid_holdings_input)
+
+@patch('yfinance.download')
+def test_no_bfill_and_limited_ffill(mock_download, valid_holdings_input):
+    """Verify that leading NaNs (pre-IPO) are preserved and ffill does not exceed 5 days."""
+    dates = pd.date_range(start="2020-01-01", periods=10)
+    # INFY listed on day 3 (leading NaNs on days 0, 1)
+    # TCS has a gap of 6 days (days 2 to 7)
+    df = pd.DataFrame({
+        ('Adj Close', 'TCS.NS'): [100.0, 101.0, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, 108.0, 109.0],
+        ('Adj Close', 'INFY.NS'): [np.nan, np.nan, 50.0, 51.0, 52.0, 53.0, 54.0, 55.0, 56.0, 57.0]
+    }, index=dates)
+    df.columns = pd.MultiIndex.from_tuples(df.columns)
+    mock_download.return_value = df
+
+    fetcher = ETFDataFetcher()
+    result = fetcher.fetch_data(valid_holdings_input)
+    price_df = result["price_data"]
+
+    # Leading NaNs for INFY must NOT be backfilled
+    assert pd.isna(price_df.loc[dates[0], "INFY.NS"])
+    assert pd.isna(price_df.loc[dates[1], "INFY.NS"])
+    assert price_df.loc[dates[2], "INFY.NS"] == 50.0
+
+    # TCS: gap of 6 consecutive NaNs starting at index 2
+    # ffill(limit=5) fills up to 5 days, so index 7 remains NaN
+    assert price_df.loc[dates[2], "TCS.NS"] == 101.0
+    assert price_df.loc[dates[6], "TCS.NS"] == 101.0
+    assert pd.isna(price_df.loc[dates[7], "TCS.NS"])
+

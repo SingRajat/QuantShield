@@ -1,7 +1,15 @@
 import pytest
 import pandas as pd
 import numpy as np
-from src.features.risk_metrics import RiskFeatureEngineer
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parent.parent.parent))
+sys.path.append(str(Path(__file__).resolve().parent.parent))
+
+try:
+    from backend.src.features.risk_metrics import RiskFeatureEngineer
+except ImportError:
+    from src.features.risk_metrics import RiskFeatureEngineer
 
 @pytest.fixture
 def mock_returns():
@@ -101,14 +109,62 @@ def test_compute_all_features(mock_returns, mock_component_data):
     
     features = engineer.compute_all_features()
     
-    # Should only contain the 4 permitted features
+    # Should contain all 11 approved risk features
     expected_keys = {
         "Annualized_Volatility", 
         "Historical_VaR_95", 
         "Maximum_Drawdown", 
-        "Diversification_Ratio"
+        "Diversification_Ratio",
+        "Skewness",
+        "Kurtosis",
+        "RollingVol20",
+        "RollingVol60",
+        "Sharpe",
+        "Sortino",
+        "Beta"
     }
     
     assert set(features.keys()) == expected_keys
     for k, v in features.items():
-        assert isinstance(v, float)
+        assert isinstance(v, (float, np.floating))
+
+def test_compute_beta_with_alignment():
+    # 25 dates
+    dates = pd.date_range("2023-01-01", periods=25, freq="B")
+    port_ret = pd.Series(np.linspace(0.01, 0.05, 25), index=dates)
+    # Market return perfectly proportional: port = 1.5 * mkt
+    mkt_ret = port_ret / 1.5
+    
+    engineer = RiskFeatureEngineer(portfolio_returns=port_ret, market_returns=mkt_ret)
+    beta = engineer.compute_beta(min_periods=20)
+    assert np.isclose(beta, 1.5)
+
+def test_compute_beta_missing_market():
+    dates = pd.date_range("2023-01-01", periods=25, freq="B")
+    port_ret = pd.Series(np.linspace(0.01, 0.05, 25), index=dates)
+    # No market returns provided
+    engineer = RiskFeatureEngineer(portfolio_returns=port_ret, market_returns=None)
+    beta = engineer.compute_beta()
+    assert np.isnan(beta)
+
+def test_compute_beta_insufficient_overlap():
+    dates = pd.date_range("2023-01-01", periods=10, freq="B")
+    port_ret = pd.Series(np.linspace(0.01, 0.05, 10), index=dates)
+    mkt_ret = port_ret / 1.5
+    # Only 10 points when min_periods=20
+    engineer = RiskFeatureEngineer(portfolio_returns=port_ret, market_returns=mkt_ret)
+    beta = engineer.compute_beta(min_periods=20)
+    assert np.isnan(beta)
+
+def test_compute_diversification_ratio_missing_ticker():
+    comp_returns = pd.DataFrame({
+        'ETF1': [0.05, 0.02, -0.01]
+    })
+    # Weights has ETF2 which is missing from comp_returns
+    weights = {'ETF1': 0.7, 'ETF2': 0.3}
+    port_returns = pd.Series([0.05, 0.02, -0.01])
+    
+    engineer = RiskFeatureEngineer(port_returns, comp_returns, weights)
+    dr = engineer.compute_diversification_ratio()
+    assert np.isnan(dr)
+

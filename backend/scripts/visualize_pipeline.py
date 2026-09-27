@@ -18,6 +18,7 @@ import numpy as np
 from backend.src.data.etf_ingestion import ETFDataFetcher
 from backend.src.features.portfolio_builder import PortfolioBuilder
 from backend.src.features.risk_metrics import RiskFeatureEngineer
+from backend.src.features.dataset_builder import DatasetBuilder
 
 # Use a single clean portfolio for demo
 DEMO_PORTFOLIO = {
@@ -56,14 +57,14 @@ def main():
     print(f"  Date Range: {price_data.index[0].date()} to {price_data.index[-1].date()}")
     print(f"\n  First 5 rows of RAW PRICE DATA:")
     print(f"  {'-'*60}")
-    print(price_data.head().to_string(float_format="₹{:,.2f}".format))
+    print(price_data.head().to_string(float_format="Rs. {:,.2f}".format))
 
     # =========================================================================
     # STEP 2: PORTFOLIO CONSTRUCTION
     # =========================================================================
     print_header(2, "PORTFOLIO CONSTRUCTION (PortfolioBuilder)")
     print("  Input: Raw prices + Weights")
-    print("  Process: Convert prices → daily returns → weight them → sum into one portfolio return\n")
+    print("  Process: Convert prices -> daily returns -> weight them -> sum into one portfolio return\n")
 
     builder = PortfolioBuilder(price_data=price_data)
     portfolio_df = builder.build_portfolio(weights)
@@ -99,23 +100,23 @@ def main():
         end = start + window_len
         w_start = daily_returns.index[start].date()
         w_end = daily_returns.index[end - 1].date()
-        bar = "█" * 30
-        gap = "░" * (i * 3)
-        print(f"  Window {i+1}: {gap}{bar}  [{w_start} → {w_end}]")
+        bar = "#" * 30
+        gap = " " * (i * 3)
+        print(f"  Window {i+1}: {gap}{bar}  [{w_start} -> {w_end}]")
 
     print(f"  ...")
     last_start = (num_windows - 1) * step_size
     last_end = last_start + window_len
     w_start = daily_returns.index[last_start].date()
     w_end = daily_returns.index[last_end - 1].date()
-    print(f"  Window {num_windows}: {'░' * 15}{'█' * 30}  [{w_start} → {w_end}]")
+    print(f"  Window {num_windows}: {' ' * 15}{'#' * 30}  [{w_start} -> {w_end}]")
 
     # =========================================================================
     # STEP 4: FEATURE ENGINEERING (one sample window)
     # =========================================================================
     print_header(4, "RISK FEATURE ENGINEERING (RiskFeatureEngineer)")
     print(f"  Computing 11 statistical metrics for Window 1...")
-    print(f"  Window 1: {daily_returns.index[0].date()} → {daily_returns.index[125].date()}\n")
+    print(f"  Window 1: {daily_returns.index[0].date()} -> {daily_returns.index[125].date()}\n")
 
     window_returns = daily_returns.iloc[0:126]
     comp_returns = builder.daily_returns.iloc[0:126]
@@ -143,50 +144,31 @@ def main():
     print(f"  {'Beta':<30} {features['Beta']:>14.2f}    Market sensitivity")
 
     # =========================================================================
-    # STEP 5: RISK LABELING
+    # STEP 5: FORWARD RISK TARGET ENGINEERING (Horizon h = 21 Days)
     # =========================================================================
-    print_header(5, "RISK CLASSIFICATION (Composite Score → Label)")
+    print_header(5, "FORWARD RISK TARGET ENGINEERING (DatasetBuilder.compute_forward_target)")
     
-    vol = features['Annualized_Volatility']
-    var95 = features['Historical_VaR_95']
-    max_dd = features['Maximum_Drawdown']
-    div_ratio = features['Diversification_Ratio']
+    future_21d = daily_returns.iloc[126:147]
+    fwd_vol, fwd_maxdd, label = DatasetBuilder.compute_forward_target(future_21d)
 
-    norm_vol = min(vol / 0.25, 1.0)
-    norm_var = min(var95 / 0.05, 1.0)
-    norm_dd = min(max_dd / 0.30, 1.0)
-    norm_div = 1.0 - min(max(div_ratio - 1.0, 0), 1.0)
-
-    core_score = (0.25 * norm_vol) + (0.35 * norm_var) + (0.15 * norm_dd)
-    
-    print(f"  Normalized Values:")
-    print(f"    Vol  → {norm_vol:.3f}  (scaled: vol / 0.25)")
-    print(f"    VaR  → {norm_var:.3f}  (scaled: var / 0.05)")
-    print(f"    MaxDD→ {norm_dd:.3f}  (scaled: dd / 0.30)")
-    print(f"    Div  → {norm_div:.3f}  (inverted: less diversified = higher)")
-    print(f"\n  Core Score = 0.25×{norm_vol:.2f} + 0.35×{norm_var:.2f} + 0.15×{norm_dd:.2f} = {core_score:.3f}")
-    print(f"  + Tail factors (skew, kurtosis, beta, sortino penalties)")
-    print(f"  × Diversification modifier")
-
-    # Determine label
-    if core_score < 0.35:
-        label = "Low"
-    elif core_score > 0.65:
-        label = "High"
-    else:
-        label = "Medium"
-    
-    print(f"\n  Thresholds: < 0.35 = Low  |  0.35-0.65 = Medium  |  > 0.65 = High")
-    print(f"\n  ┌─────────────────────────────────────────────┐")
-    print(f"  │  COMPOSITE SCORE: {core_score:.3f}  →  RISK LABEL: {label:>6}  │")
-    print(f"  └─────────────────────────────────────────────┘")
+    print(f"  Future Window [t+1 : t+21]: {future_21d.index[0].date()} -> {future_21d.index[-1].date()}")
+    print(f"  Realized Forward Annualized Volatility: {fwd_vol:>14.2%}")
+    print(f"  Realized Forward Maximum Drawdown:      {fwd_maxdd:>14.2%}")
+    print(f"\n  Forward Regime Rules:")
+    print(f"    High   -> Vol >= 22% OR MaxDD >= 6.5%")
+    print(f"    Low    -> Vol < 15% AND MaxDD < 4.5%")
+    print(f"    Medium -> Otherwise")
+    print(f"\n  +---------------------------------------------------------+")
+    print(f"  |  FORWARD REALIZED RISK TARGET (Y_t+21): {label:>12}     |")
+    print(f"  +---------------------------------------------------------+")
 
     # =========================================================================
     # STEP 6: SUMMARY
     # =========================================================================
     print_header(6, "FINAL DATASET SAMPLE (One Row in training_dataset.csv)")
     print(f"  Portfolio_ID:  DEMO_NIFTY_BANK")
-    print(f"  Window:        {daily_returns.index[0].date()} → {daily_returns.index[125].date()}")
+    print(f"  Input Window:  {daily_returns.index[0].date()} -> {daily_returns.index[125].date()} (X_t)")
+    print(f"  Target Window: {future_21d.index[0].date()} -> {future_21d.index[-1].date()} (Y_t+21)")
     print(f"  Vol:           {features['Annualized_Volatility']:.4f}")
     print(f"  VaR95:         {features['Historical_VaR_95']:.4f}")
     print(f"  MaxDD:         {features['Maximum_Drawdown']:.4f}")
@@ -198,12 +180,13 @@ def main():
     print(f"  Sharpe:        {features['Sharpe']:.4f}")
     print(f"  Sortino:       {features['Sortino']:.4f}")
     print(f"  Beta:          {features['Beta']:.4f}")
+    print(f"  Forward_Vol:   {fwd_vol:.4f}")
+    print(f"  Forward_MaxDD: {fwd_maxdd:.4f}")
     print(f"  Label:         {label}")
-    print(f"\n  This × {num_windows} windows × 30 ETFs = ~5,000 training samples")
-    print(f"  → Fed into RandomForestClassifier (200 trees, 5-fold TimeSeriesSplit)")
-    print(f"  → Achieves 95%+ accuracy on unseen portfolios")
+    print(f"\n  -> Fed into CatBoostClassifier with PurgedGroupTimeSeriesSplit (30d embargo)")
+    print(f"  -> Benchmarked against RiskMetrics EWMA statistical baseline")
     print(f"\n{'='*70}")
-    print(f"  PIPELINE COMPLETE — No files were modified.")
+    print(f"  PIPELINE COMPLETE - Zero lookahead leakage.")
     print(f"{'='*70}\n")
 
 

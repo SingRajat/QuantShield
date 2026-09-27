@@ -1,9 +1,10 @@
 import os
 import sys
-import argparse
-import joblib
+import json
 import logging
 from pathlib import Path
+import pandas as pd
+import yfinance as yf
 
 # Add project root and backend to sys.path
 project_root = Path(__file__).resolve().parent.parent.parent
@@ -13,13 +14,12 @@ sys.path.append(str(project_root / 'backend'))
 from backend.src.data.etf_ingestion import ETFDataFetcher
 from backend.src.features.portfolio_builder import PortfolioBuilder
 from backend.src.features.dataset_builder import DatasetBuilder
-from backend.src.models.risk_classifier import RiskClassifier
+from backend.src.models.risk_regressor import RiskRegressor
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# To guarantee 20 years of data without `dropna()` truncating the series to recently listed stocks,
-# all mock portfolios strictly use high-liquidity, historic Indian equities listed pre-2005/2010.
+# Mock portfolios using liquid, historic Indian equities listed pre-2005/2010
 MOCK_PORTFOLIOS = [
     {"etf_name": "NIFTY_IT_ETF", "holdings": [{"ticker": "TCS.NS", "weight": 0.3}, {"ticker": "INFY.NS", "weight": 0.3}, {"ticker": "HCLTECH.NS", "weight": 0.2}, {"ticker": "WIPRO.NS", "weight": 0.2}]},
     {"etf_name": "NIFTY_BANK_ETF", "holdings": [{"ticker": "HDFCBANK.NS", "weight": 0.3}, {"ticker": "ICICIBANK.NS", "weight": 0.3}, {"ticker": "SBIN.NS", "weight": 0.2}, {"ticker": "AXISBANK.NS", "weight": 0.2}]},
@@ -53,80 +53,189 @@ MOCK_PORTFOLIOS = [
     {"etf_name": "BROKING_FINANCIALS_PROXY", "holdings": [{"ticker": "MOTILALOFS.NS", "weight": 0.3}, {"ticker": "EDELWEISS.NS", "weight": 0.3}, {"ticker": "JMFINANCIL.NS", "weight": 0.2}, {"ticker": "GEOJITFSL.NS", "weight": 0.2}]}
 ]
 
-# Provide reporting dates globally, as the fetcher expects it in the dictionary
 for port in MOCK_PORTFOLIOS:
     port["reporting_date"] = "2023-10-31"
 
+import argparse
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="QuantShield Risk Forecasting Pipeline")
+    parser.add_argument(
+        "--feature-set",
+        type=str,
+        default="v1_baseline",
+        choices=["v1_baseline", "family_a", "family_b", "v1_1", "family_b_ewma", "family_b_plus_ewma"],
+        help="Feature set configuration ('v1_baseline' / 'family_a', 'family_b' / 'v1_1', or 'family_b_ewma')"
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help="Directory to save artifacts. Defaults to backend/src/models for v1_baseline, or backend/src/models/experiments/{feature_set}"
+    )
+    parser.add_argument(
+        "--from-base-dataset",
+        type=str,
+        default=None,
+        help="Path to existing training_dataset.csv to derive features from without refetching from yfinance"
+    )
+    return parser.parse_args()
+
 def main():
-    logger.info("Starting End-to-End Pipeline Validation...")
+    args = parse_args()
+    logger.info(f"Starting QuantShield Continuous Risk Forecasting Pipeline [Feature Set: {args.feature_set}]...")
 
-    # 1. Ingestion Phase - 20 YEARS
-    fetcher = ETFDataFetcher(years=20)
-    
-    portfolios = {}
-    component_returns_dict = {}
-    weights_dict = {}
-    
-    for port_def in MOCK_PORTFOLIOS:
-        etf_name = port_def["etf_name"]
-        logger.info(f"Fetching data for portfolio: {etf_name}")
+    # Determine output directory
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    elif args.feature_set in ["v1_baseline", "family_a"]:
+        output_dir = project_root / 'backend' / 'src' / 'models'
+    elif args.feature_set in ["family_b", "v1_1"]:
+        output_dir = project_root / 'backend' / 'src' / 'models' / 'experiments' / 'family_b'
+    elif args.feature_set in ["family_b_ewma", "family_b_plus_ewma"]:
+        output_dir = project_root / 'backend' / 'src' / 'models' / 'experiments' / 'family_b_ewma'
+    else:
+        output_dir = project_root / 'backend' / 'src' / 'models' / 'experiments' / args.feature_set
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Artifacts will be saved to: {output_dir}")
+
+    # Dataset Construction
+    if args.from_base_dataset:
+        base_path = Path(args.from_base_dataset)
+        logger.info(f"Loading base dataset from: {base_path}")
+        if not base_path.exists():
+            raise FileNotFoundError(f"Base dataset not found at {base_path}")
+        base_df = pd.read_csv(base_path)
+        base_df["Date_t"] = pd.to_datetime(base_df["Date_t"])
+        base_df["Target_Start"] = pd.to_datetime(base_df["Target_Start"])
+        base_df["Target_End"] = pd.to_datetime(base_df["Target_End"])
+
+        if args.feature_set in ["family_b", "v1_1", "family_b_ewma", "family_b_plus_ewma"]:
+            if "Delta_Vol_5" not in base_df.columns:
+                panel_df = DatasetBuilder.add_family_b_features(base_df)
+            else:
+                panel_df = base_df
+        else:
+            panel_df = base_df
+    else:
+        # 1. Ingestion Phase - 20 YEARS
+        fetcher = ETFDataFetcher(years=20)
+        portfolios = {}
+        component_returns_dict = {}
+        weights_dict = {}
         
-        try:
-            output = fetcher.fetch_data(port_def)
-            price_data = output["price_data"]
-            weights = output["weights"]
-            
-            # 2. Portfolio Building Phase
-            builder = PortfolioBuilder(price_data=price_data)
-            portfolio_df = builder.build_portfolio(weights)
-            
-            portfolios[etf_name] = portfolio_df
-            component_returns_dict[etf_name] = builder.daily_returns
-            weights_dict[etf_name] = weights
-            
-        except Exception as e:
-            logger.error(f"Failed to process portfolio {etf_name}: {e}")
+        for port_def in MOCK_PORTFOLIOS:
+            etf_name = port_def["etf_name"]
+            logger.info(f"Fetching data for portfolio: {etf_name}")
+            try:
+                output = fetcher.fetch_data(port_def)
+                price_data = output["price_data"]
+                weights = output["weights"]
+                
+                # 2. Portfolio Building Phase
+                builder = PortfolioBuilder(price_data=price_data)
+                portfolio_df = builder.build_portfolio(weights)
+                portfolios[etf_name] = portfolio_df
+                component_returns_dict[etf_name] = builder.daily_returns
+                weights_dict[etf_name] = weights
+            except Exception as e:
+                logger.error(f"Failed to process portfolio {etf_name}: {e}")
 
-    if not portfolios:
-        logger.error("No valid portfolios were processed. Exiting.")
-        return
+        if not portfolios:
+            logger.error("No valid portfolios were processed. Exiting.")
+            return
 
-    # 3. Dataset Building (Statistical Feature Engineering & Target Assignment)
-    # This implicitly respects WINDOW_LENGTH=126 and STEP_SIZE=21 per your original pipeline
-    logger.info("Initializing DatasetBuilder...")
-    dataset_builder = DatasetBuilder(
-        portfolios=portfolios,
-        component_returns_dict=component_returns_dict,
-        weights_dict=weights_dict
+        # 3. Build Panel Dataset
+        logger.info(f"Initializing DatasetBuilder (feature_set={args.feature_set})...")
+        dataset_builder = DatasetBuilder(portfolios=portfolios, feature_set=args.feature_set)
+        panel_df = dataset_builder.build_panel_dataset(drop_incomplete=True, feature_set=args.feature_set)
+
+    d_min = panel_df['Date_t'].min()
+    d_max = panel_df['Date_t'].max()
+    d_min_str = d_min.strftime('%Y-%m-%d') if hasattr(d_min, 'strftime') else str(d_min)[:10]
+    d_max_str = d_max.strftime('%Y-%m-%d') if hasattr(d_max, 'strftime') else str(d_max)[:10]
+    logger.info(f"Date range: {d_min_str} to {d_max_str}")
+
+    # Save the dataset to the designated output directory
+    dataset_path = output_dir / 'training_dataset.csv'
+    panel_df.to_csv(dataset_path, index=False)
+    logger.info(f"Saved dataset to: {dataset_path}")
+
+    # 4. Multi-Output Continuous Risk Regressor Training with Purged Walk-Forward CV
+    logger.info(f"Initializing Multi-Output RiskRegressor (feature_set={args.feature_set})...")
+    regressor = RiskRegressor(
+        iterations=300, 
+        depth=6, 
+        learning_rate=0.05, 
+        random_seed=42, 
+        feature_set=args.feature_set
     )
     
-    panel_df = dataset_builder.build_panel_dataset()
-    logger.info(f"Successfully built panel dataset. Shape: {panel_df.shape}")
-    logger.info(f"Class distribution:\n{panel_df['Label'].value_counts()}")
-
-    # Save the generated dataset to a CSV file
-    dataset_path = project_root / 'backend' / 'src' / 'models' / 'training_dataset.csv'
-    dataset_path.parent.mkdir(parents=True, exist_ok=True)
-    panel_df.to_csv(dataset_path, index=False)
-    logger.info(f"Saved generated training dataset to: {dataset_path}")
-
-    # 4. Training Model (ML Classifier)
-    logger.info("Initializing RiskClassifier...")
-    classifier = RiskClassifier()
+    # 5 splits, 21d embargo after max forward target end date
+    eval_results = regressor.train_and_evaluate(panel_df=panel_df, n_splits=5, embargo_days=21)
     
-    eval_results = classifier.train_and_evaluate(panel_dataset=panel_df, n_splits=5)
+    vol_res = eval_results["vol_forecast"]
+    mdd_res = eval_results["maxdd_forecast"]
     
-    logger.info(f"Training completed successfully. Avg Accuracy: {eval_results['average_accuracy']:.2f}")
+    logger.info(
+        f"\n=======================================================\n"
+        f"Purged Walk-Forward Continuous CV Results ({eval_results['total_evaluated_observations']} evaluated observations):\n"
+        f"  Feature Set:                    {args.feature_set} ({len(regressor.features)} features)\n"
+        f"  ML Vol Forecast OOF MAE:        {vol_res['oof_mae']:.4f}\n"
+        f"  ML Vol Forecast OOF RMSE:       {vol_res['oof_rmse']:.4f}\n"
+        f"  ML Vol Forecast Correlation:    {vol_res['oof_correlation']:.4f}\n"
+        f"  EWMA Benchmark OOF MAE:         {vol_res.get('ewma_baseline_mae', float('nan')):.4f}\n"
+        f"  EWMA Benchmark OOF RMSE:        {vol_res.get('ewma_baseline_rmse', float('nan')):.4f}\n"
+        f"  EWMA Benchmark Correlation:     {vol_res.get('ewma_baseline_correlation', float('nan')):.4f}\n"
+        f"  Vol MAE Lift vs EWMA:           {vol_res.get('lift_vs_ewma_mae', float('nan')):+.4f}\n"
+        f"-------------------------------------------------------\n"
+        f"  ML MaxDD Forecast OOF MAE:      {mdd_res['oof_mae']:.4f}\n"
+        f"  ML MaxDD Forecast OOF RMSE:     {mdd_res['oof_rmse']:.4f}\n"
+        f"  ML MaxDD Forecast Correlation:  {mdd_res['oof_correlation']:.4f}\n"
+        f"======================================================="
+    )
 
     # 5. Serialization Integration
-    model_dir = project_root / 'backend' / 'src' / 'models'
-    model_dir.mkdir(parents=True, exist_ok=True)
-    
-    model_path = model_dir / 'saved_model.cbm'
-    classifier.model.save_model(str(model_path))
-    logger.info(f"Serialized trained CatBoost model to: {model_path}")
-    
-    logger.info("End-to-End Pipeline Validation was completed successfully.")
+    model_path = output_dir / 'saved_model.cbm'
+    regressor.model.save_model(str(model_path))
+    logger.info(f"Serialized trained CatBoost MultiRMSE model to: {model_path}")
+
+    # Save experiment config
+    config_payload = {
+        "experiment_name": f"Experiment_{args.feature_set}",
+        "feature_set": args.feature_set,
+        "feature_count": len(regressor.features),
+        "features": regressor.features,
+        "targets": RiskRegressor.TARGETS,
+        "forecast_horizon_days": DatasetBuilder.FORECAST_HORIZON,
+        "iterations": 300,
+        "depth": 6,
+        "learning_rate": 0.05,
+        "early_stopping_rounds": 20,
+        "n_splits": 5,
+        "embargo_days": 21,
+        "random_seed": 42
+    }
+    config_path = output_dir / 'experiment_config.json'
+    with open(config_path, 'w') as f:
+        json.dump(config_payload, f, indent=2)
+    logger.info(f"Saved experiment configuration to: {config_path}")
+
+    # Save model transparency metadata for API & UI consumption
+    metadata_path = output_dir / 'model_metadata.json'
+    meta_payload = {
+        "features": regressor.features,
+        "targets": RiskRegressor.TARGETS,
+        "forecast_horizon_days": DatasetBuilder.FORECAST_HORIZON,
+        "total_evaluated_observations": eval_results["total_evaluated_observations"],
+        "vol_forecast": vol_res,
+        "maxdd_forecast": mdd_res,
+        "folds": eval_results["folds"]
+    }
+    with open(metadata_path, 'w') as f:
+        json.dump(meta_payload, f, indent=2)
+    logger.info(f"Saved continuous model evaluation metadata to: {metadata_path}")
 
 if __name__ == "__main__":
     main()

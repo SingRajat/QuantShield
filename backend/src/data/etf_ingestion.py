@@ -122,11 +122,13 @@ class ETFDataFetcher:
                  total_w = sum(weights.values())
                  weights = {t: w / total_w for t, w in weights.items()}
 
-            # Data Integrity: Forward fill holidays/weekends, backward fill missing starting prices
-            df = df.ffill().bfill()
+            # Data Integrity: Forward fill short gaps (holidays/weekends) up to 5 days.
+            # Do NOT bfill(): leaving leading missing values as NaN ensures pre-IPO/late-listing periods
+            # are not masked with zero-volatility flat prices.
+            df = df.ffill(limit=5)
             
             # Second pass: check if any columns remain all NaN
-            nan_cols = df.columns[df.isna().all()].tolist()
+            nan_cols = [c for c in df.columns if df[c].dropna().empty]
             if nan_cols:
                 raise ValueError(f"These validly fetched tickers contain only NaN values over the requested timeframe: {nan_cols}")
 

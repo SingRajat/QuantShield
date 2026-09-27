@@ -1,7 +1,7 @@
 import os
 import sys
 import argparse
-import catboost from CatBoostClassifier
+from catboost import CatBoostClassifier
 import logging
 from pathlib import Path
 from sklearn.metrics import classification_report, accuracy_score
@@ -14,6 +14,10 @@ sys.path.append(str(project_root / 'backend'))
 from backend.src.data.etf_ingestion import ETFDataFetcher
 from backend.src.features.portfolio_builder import PortfolioBuilder
 from backend.src.features.dataset_builder import DatasetBuilder
+from backend.src.models.risk_classifier import RiskClassifier
+from backend.src.models.baseline_ewma import EWMABaseline
+import pandas as pd
+import yfinance as yf
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -96,51 +100,67 @@ def main():
         logger.error("No valid unseen portfolios were processed. Exiting.")
         return
 
-    # 3. Dataset Building (Using exactly the same rules as training)
+    # 3. Fetch Market Benchmark (^NSEI) for Beta calculation
+    min_date = min(df.index.min() for df in portfolios.values())
+    max_date = max(df.index.max() for df in portfolios.values())
+    logger.info(f"Downloading benchmark (^NSEI) from {min_date.strftime('%Y-%m-%d')} to {max_date.strftime('%Y-%m-%d')}...")
+    benchmark_returns = None
+    try:
+        bm_raw = yf.download('^NSEI', start=min_date, end=max_date + pd.Timedelta(days=1), progress=False)
+        if not bm_raw.empty:
+            if isinstance(bm_raw.columns, pd.MultiIndex):
+                bm_prices = bm_raw['Adj Close'] if 'Adj Close' in bm_raw.columns.levels[0] else bm_raw['Close']
+            else:
+                bm_prices = bm_raw['Adj Close'] if 'Adj Close' in bm_raw.columns else bm_raw['Close']
+            if isinstance(bm_prices, pd.DataFrame):
+                bm_prices = bm_prices.iloc[:, 0]
+            benchmark_returns = bm_prices.pct_change().dropna()
+    except Exception as e:
+        logger.warning(f"Failed to download benchmark: {e}")
+
+    # 4. Dataset Building (Using exactly the same rules as training)
     logger.info("Initializing DatasetBuilder for unseen data...")
     dataset_builder = DatasetBuilder(
         portfolios=portfolios,
         component_returns_dict=component_returns_dict,
-        weights_dict=weights_dict
+        weights_dict=weights_dict,
+        benchmark_returns=benchmark_returns
     )
     
-    unseen_df = dataset_builder.build_panel_dataset()
+    unseen_df = dataset_builder.build_panel_dataset(drop_incomplete=True)
     logger.info(f"Successfully built Unseen Panel Dataset. Shape: {unseen_df.shape}")
-    logger.info(f"Actual distribution (calculated by rules):\n{unseen_df['Label'].value_counts()}")
 
     # 4. Model Evaluation on Unseen Data
-    features = [
-        "Vol",
-        "VaR95",
-        "MaxDD",
-        "DivRatio",
-        "Skewness",
-        "Kurtosis",
-        "RollingVol20",
-        "RollingVol60",
-        "Sharpe",
-        "Sortino",
-        "Beta"
-    ]
-    X_unseen = unseen_df[features]
-    y_actual = unseen_df['Label']
+    X_unseen = unseen_df[RiskClassifier.FEATURES]
     
-    # Predict without seeing the actual labels!
-    y_pred = classifier_model.predict(X_unseen).flatten()
-    
-    accuracy = accuracy_score(y_actual, y_pred)
-    report = classification_report(y_actual, y_pred)
-    
-    logger.info(f"\n=======================================================\n")
-    logger.info(f"GENERALIZATION ACCURACY ON UNSEEN ETFs: {accuracy:.4f}")
-    logger.info(f"\nClassification Report for Unseen Data:\n{report}")
-    logger.info(f"=======================================================\n")
-
-    # Optional: Save Unseen Dataset
-    unseen_path = project_root / 'backend' / 'src' / 'models' / 'unseen_evaluation_dataset.csv'
-    unseen_df['Predicted_Label'] = y_pred
-    unseen_df.to_csv(unseen_path, index=False)
-    logger.info(f"Saved unseen evaluation predictions to: {unseen_path}")
+    if "Label" in unseen_df.columns:
+        y_actual = unseen_df["Label"]
+        y_pred = classifier_model.predict(X_unseen).flatten()
+        accuracy = accuracy_score(y_actual, y_pred)
+        report = classification_report(y_actual, y_pred, zero_division=0)
+        
+        # Benchmark against RiskMetrics EWMA Baseline
+        ewma_engine = EWMABaseline(decay=0.94)
+        vol_col = "RollingVol20" if "RollingVol20" in X_unseen.columns else "Vol"
+        ewma_preds = [ewma_engine.predict_regime_from_vol(v) for v in X_unseen[vol_col]]
+        ewma_acc = accuracy_score(y_actual, ewma_preds)
+        lift = accuracy - ewma_acc
+        
+        logger.info(f"\n=======================================================\n")
+        logger.info(f"UNSEEN ETF OUT-OF-SAMPLE EVALUATION:\n")
+        logger.info(f"  CatBoost Model Accuracy:     {accuracy:.4f}")
+        logger.info(f"  EWMA Baseline Accuracy:      {ewma_acc:.4f}")
+        logger.info(f"  ML Model Lift vs Baseline:   {lift:+.4f} ({lift*100:+.2f}%)")
+        logger.info(f"\nClassification Report for Unseen Data:\n{report}")
+        logger.info(f"=======================================================\n")
+        
+        unseen_path = project_root / 'backend' / 'src' / 'models' / 'unseen_evaluation_dataset.csv'
+        unseen_df['Predicted_Label'] = y_pred
+        unseen_df['EWMA_Predicted_Label'] = ewma_preds
+        unseen_df.to_csv(unseen_path, index=False)
+        logger.info(f"Saved unseen evaluation predictions to: {unseen_path}")
+    else:
+        logger.info("Unseen dataset does not contain 'Label' column.")
 
 
 if __name__ == "__main__":
