@@ -17,3 +17,4 @@ seaborn
 matplotlib
 catboost
 prometheus-fastapi-instrumentator
+httpx
