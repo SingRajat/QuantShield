@@ -102,16 +102,10 @@ jobs:
       - name: Checkout Code Repository
         uses: actions/checkout@v4
 
-      - name: Set up Docker Buildx
-        uses: actions/setup-buildx-action@v3
-
       - name: Build Docker Container Image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          push: false
-          tags: ${{ env.IMAGE_NAME }}:latest,${{ env.IMAGE_NAME }}:${{ github.sha }}
+        run: |
+          docker build -t quantshield-backend:latest -t quantshield-backend:${{ github.sha }} .
+          docker images | grep quantshield-backend
 
   # =========================================================================
   # STAGE 4: Kubernetes Manifest Validation & Orchestration Simulation
@@ -125,10 +119,13 @@ jobs:
       - name: Checkout Code Repository
         uses: actions/checkout@v4
 
-      - name: Set up Minikube / KinD Cluster
-        uses: helm/kind-action@v1.8.0
-        with:
-          cluster_name: quantshield-cluster
+      - name: Install KinD & Create Kubernetes Cluster
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.22.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+          kind create cluster --name quantshield-cluster
+          kubectl cluster-info
 
       - name: Build & Load Image into KinD Cluster
         run: |
@@ -150,7 +147,7 @@ jobs:
         run: |
           docker tag quantshield-backend:v1.0.0 quantshield-backend:v2.0.0
           kind load docker-image quantshield-backend:v2.0.0 --name quantshield-cluster
-          kubectl set image deployment/quantshield-backend quantshield-api=quantshield-backend:v2.0.0 --record
+          kubectl set image deployment/quantshield-backend quantshield-api=quantshield-backend:v2.0.0
           kubectl rollout status deployment/quantshield-backend --timeout=120s
           kubectl rollout history deployment/quantshield-backend
 
