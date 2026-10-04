@@ -1,0 +1,96 @@
+{
+  "features": [
+    "Vol_t",
+    "Vol_t5",
+    "Vol_t21",
+    "Vol_t63",
+    "MaxDD_t",
+    "MaxDD_t5",
+    "MaxDD_t21",
+    "MaxDD_t63",
+    "Delta_Vol_5",
+    "Delta_Vol_21",
+    "Delta_Vol_63",
+    "Vol_Ratio_21_63",
+    "Delta_MaxDD_5",
+    "Delta_MaxDD_21",
+    "Delta_MaxDD_63"
+  ],
+  "targets": [
+    "Forward_Vol",
+    "Forward_MaxDD"
+  ],
+  "forecast_horizon_days": 21,
+  "total_evaluated_observations": 4917,
+  "vol_forecast": {
+    "oof_mae": 0.057745445786510766,
+    "oof_rmse": 0.08439177913089027,
+    "oof_correlation": 0.5535496456273077,
+    "ewma_baseline_mae": 0.05776762818986063,
+    "ewma_baseline_rmse": 0.08828327062565233,
+    "ewma_baseline_correlation": 0.589485447179551,
+    "lift_vs_ewma_mae": 2.218240334986299e-05
+  },
+  "maxdd_forecast": {
+    "oof_mae": 0.028991991232944377,
+    "oof_rmse": 0.040360628343104665,
+    "oof_correlation": 0.2442787542580247
+  },
+  "folds": [
+    {
+      "fold": 1,
+      "n_train": 1386,
+      "n_test": 988,
+      "vol_mae": 0.05404067633077105,
+      "vol_rmse": 0.06720047734350466,
+      "maxdd_mae": 0.02949911764028031,
+      "maxdd_rmse": 0.035257271974743494,
+      "ewma_vol_mae": 0.050090045206185325,
+      "lift_vs_ewma": -0.003950631124585727
+    },
+    {
+      "fold": 2,
+      "n_train": 2433,
+      "n_test": 990,
+      "vol_mae": 0.051789904508890656,
+      "vol_rmse": 0.07193481840450958,
+      "maxdd_mae": 0.026878999950634887,
+      "maxdd_rmse": 0.03526488719838865,
+      "ewma_vol_mae": 0.05437246155275249,
+      "lift_vs_ewma": 0.00258255704386183
+    },
+    {
+      "fold": 3,
+      "n_train": 3455,
+      "n_test": 990,
+      "vol_mae": 0.07651388784588639,
+      "vol_rmse": 0.12205542437752906,
+      "maxdd_mae": 0.03785580074472609,
+      "maxdd_rmse": 0.05858998357654311,
+      "ewma_vol_mae": 0.08110606875762036,
+      "lift_vs_ewma": 0.004592180911733967
+    },
+    {
+      "fold": 4,
+      "n_train": 4501,
+      "n_test": 989,
+      "vol_mae": 0.05229856467472908,
+      "vol_rmse": 0.07025480591007183,
+      "maxdd_mae": 0.025464040384156242,
+      "maxdd_rmse": 0.032230123573932436,
+      "ewma_vol_mae": 0.04777421041376497,
+      "lift_vs_ewma": -0.004524354260964106
+    },
+    {
+      "fold": 5,
+      "n_train": 5524,
+      "n_test": 960,
+      "vol_mae": 0.05395638939889095,
+      "vol_rmse": 0.07775600861866669,
+      "maxdd_mae": 0.025142816703596523,
+      "maxdd_rmse": 0.03422580005846821,
+      "ewma_vol_mae": 0.05539794170765718,
+      "lift_vs_ewma": 0.0014415523087662335
+    }
+  ]
+}

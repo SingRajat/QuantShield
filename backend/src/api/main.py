@@ -28,6 +28,7 @@ from backend.src.features.risk_metrics import RiskFeatureEngineer
 from backend.src.models.risk_regressor import RiskRegressor
 from backend.src.models.risk_calibration import calibrate_risk_probabilities, get_calibration_metadata
 from backend.src.models.llm_agent import MockLLMAgent
+from prometheus_fastapi_instrumentator import Instrumentator
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +46,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Instrument Prometheus metrics endpoint (/metrics)
+Instrumentator().instrument(app).expose(app)
 
 class Holding(BaseModel):
     ticker: str

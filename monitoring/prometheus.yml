@@ -1,0 +1,16 @@
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: 'quantshield-backend'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['quantshield-backend:8000', 'host.docker.internal:8000', 'localhost:8000']
+        labels:
+          app: 'quantshield-backend'
+          environment: 'production'
+
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

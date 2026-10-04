@@ -1,0 +1,99 @@
+---
+- name: Provision QuantShield Production Runtime Environment
+  hosts: app_servers
+  become: yes
+  vars:
+    app_user: quantshield
+    app_group: quantshield
+    app_base_dir: /opt/quantshield
+    app_port: 8000
+    python_version: python3
+
+  tasks:
+    - name: 1. Update apt package cache and install system prerequisites
+      apt:
+        name:
+          - curl
+          - git
+          - python3
+          - python3-pip
+          - python3-venv
+          - ca-certificates
+        state: present
+        update_cache: yes
+      when: ansible_os_family == "Debian"
+
+    - name: 2. Ensure application system group exists
+      group:
+        name: "{{ app_group }}"
+        state: present
+        system: yes
+
+    - name: 3. Ensure application dedicated service user exists
+      user:
+        name: "{{ app_user }}"
+        group: "{{ app_group }}"
+        home: "{{ app_base_dir }}"
+        shell: /bin/bash
+        system: yes
+        create_home: yes
+
+    - name: 4. Create directory structure for application, config, logs, and models
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0755'
+      loop:
+        - "{{ app_base_dir }}/app"
+        - "{{ app_base_dir }}/config"
+        - "{{ app_base_dir }}/logs"
+        - "{{ app_base_dir }}/models"
+
+    - name: 5. Manage runtime environment configuration (.env)
+      copy:
+        dest: "{{ app_base_dir }}/config/.env"
+        owner: "{{ app_user }}"
+        group: "{{ app_group }}"
+        mode: '0600'
+        content: |
+          # QuantShield Automated Production Environment
+          ENVIRONMENT=production
+          PORT={{ app_port }}
+          LOG_LEVEL=INFO
+          MODEL_PATH={{ app_base_dir }}/models/saved_model.cbm
+          METRICS_ENABLED=true
+
+    - name: 6. Deploy Systemd service unit for QuantShield daemon
+      copy:
+        dest: /etc/systemd/system/quantshield.service
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=QuantShield Continuous Risk Forecasting API
+          After=network.target
+
+          [Service]
+          Type=simple
+          User={{ app_user }}
+          Group={{ app_group }}
+          WorkingDirectory={{ app_base_dir }}/app
+          EnvironmentFile={{ app_base_dir }}/config/.env
+          ExecStart=/usr/bin/python3 -m uvicorn backend.src.api.main:app --host 0.0.0.0 --port {{ app_port }}
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: 7. Verify deployment readiness
+      stat:
+        path: "{{ app_base_dir }}/config/.env"
+      register: env_file_stat
+
+    - name: 8. Report configuration summary
+      debug:
+        msg: "QuantShield runtime environment successfully provisioned at {{ app_base_dir }} for user {{ app_user }}. Verified state: {{ env_file_stat.stat.exists }}"

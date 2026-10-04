@@ -1,0 +1,136 @@
+name: QuantShield DevOps CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - work
+  pull_request:
+    branches:
+      - main
+      - work
+
+env:
+  IMAGE_NAME: quantshield-backend
+
+jobs:
+  # =========================================================================
+  # STAGE 1: Unit & Integration Testing
+  # =========================================================================
+  test:
+    name: Run Unit & API Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11 Runtime
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Execute API & Metrics Validation
+        run: |
+          if [ -f backend/tests/test_api.py ]; then
+            pytest backend/tests/test_api.py -v
+          else
+            python -c "from backend.src.api.main import app; from fastapi.testclient import TestClient; c = TestClient(app); r1 = c.get('/api/v1/risk/health'); assert r1.status_code == 200, f'Health failed: {r1.text}'; r2 = c.get('/metrics'); assert r2.status_code == 200, f'Metrics failed: {r2.text}'; print('QuantShield API & Prometheus Metrics validated successfully!')"
+          fi
+
+  # =========================================================================
+  # STAGE 2: Ansible IaC & Configuration Validation
+  # =========================================================================
+  ansible-lint:
+    name: Validate Ansible Configuration
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v4
+
+      - name: Install Ansible
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ansible
+
+      - name: Verify Ansible Playbook Syntax & Dry-Run
+        run: |
+          ansible-playbook -i ansible/inventory ansible/playbook.yml --syntax-check
+
+  # =========================================================================
+  # STAGE 3: Docker Build & Verification
+  # =========================================================================
+  docker-build:
+    name: Build & Verify Docker Image
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: actions/setup-buildx-action@v3
+
+      - name: Build Docker Container Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: ${{ env.IMAGE_NAME }}:latest,${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+  # =========================================================================
+  # STAGE 4: Kubernetes Manifest Validation & Orchestration Simulation
+  # =========================================================================
+  k8s-validation:
+    name: Validate Kubernetes Manifests & Rollout
+    runs-on: ubuntu-latest
+    needs: docker-build
+
+    steps:
+      - name: Checkout Code Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Minikube / KinD Cluster
+        uses: helm/kind-action@v1.8.0
+        with:
+          cluster_name: quantshield-cluster
+
+      - name: Build & Load Image into KinD Cluster
+        run: |
+          docker build -t quantshield-backend:v1.0.0 .
+          kind load docker-image quantshield-backend:v1.0.0 --name quantshield-cluster
+
+      - name: Apply Kubernetes Manifests
+        run: |
+          kubectl apply -f k8s/deployment.yaml
+          kubectl apply -f k8s/service.yaml
+
+      - name: Wait for Deployment Rollout
+        run: |
+          kubectl rollout status deployment/quantshield-backend --timeout=120s
+          kubectl get pods -o wide
+          kubectl get svc
+
+      - name: Test Rolling Update (v1.0.0 -> v2.0.0 simulation)
+        run: |
+          docker tag quantshield-backend:v1.0.0 quantshield-backend:v2.0.0
+          kind load docker-image quantshield-backend:v2.0.0 --name quantshield-cluster
+          kubectl set image deployment/quantshield-backend quantshield-api=quantshield-backend:v2.0.0 --record
+          kubectl rollout status deployment/quantshield-backend --timeout=120s
+          kubectl rollout history deployment/quantshield-backend
+
+      - name: Test Rollback (v2.0.0 -> v1.0.0)
+        run: |
+          kubectl rollout undo deployment/quantshield-backend
+          kubectl rollout status deployment/quantshield-backend --timeout=120s
+          kubectl rollout history deployment/quantshield-backend

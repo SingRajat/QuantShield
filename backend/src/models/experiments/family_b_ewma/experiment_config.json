@@ -1,0 +1,35 @@
+{
+  "experiment_name": "Experiment_family_b_ewma",
+  "feature_set": "family_b_ewma",
+  "feature_count": 16,
+  "features": [
+    "Vol_t",
+    "Vol_t5",
+    "Vol_t21",
+    "Vol_t63",
+    "MaxDD_t",
+    "MaxDD_t5",
+    "MaxDD_t21",
+    "MaxDD_t63",
+    "Delta_Vol_5",
+    "Delta_Vol_21",
+    "Delta_Vol_63",
+    "Vol_Ratio_21_63",
+    "Delta_MaxDD_5",
+    "Delta_MaxDD_21",
+    "Delta_MaxDD_63",
+    "EWMA_Vol_t"
+  ],
+  "targets": [
+    "Forward_Vol",
+    "Forward_MaxDD"
+  ],
+  "forecast_horizon_days": 21,
+  "iterations": 300,
+  "depth": 6,
+  "learning_rate": 0.05,
+  "early_stopping_rounds": 20,
+  "n_splits": 5,
+  "embargo_days": 21,
+  "random_seed": 42
+}

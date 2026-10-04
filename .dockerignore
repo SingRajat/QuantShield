@@ -1,0 +1,15 @@
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.git
+.gitignore
+.env
+.venv
+quant-env/
+frontend/
+docs/
+devops_evidence/
+*.md
+*.log

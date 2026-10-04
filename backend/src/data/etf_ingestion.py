@@ -80,7 +80,7 @@ class ETFDataFetcher:
             
             # Error checking: yfinance might download empty data if no tickers are valid
             if data.empty:
-                raise ValueError("Downloaded data is completely empty. Please verify tickers.")
+                raise ValueError(f"Downloaded data is completely empty. Please verify tickers: {tickers_to_fetch}")
             
             # Extract 'Adj Close' or 'Close' robustly
             if isinstance(data.columns, pd.MultiIndex):

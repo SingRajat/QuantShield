@@ -16,3 +16,4 @@ plotly
 seaborn
 matplotlib
 catboost
+prometheus-fastapi-instrumentator

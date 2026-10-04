@@ -1,0 +1,2 @@
+[app_servers]
+localhost ansible_connection=local ansible_python_interpreter=auto
