@@ -86,9 +86,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install ansible-core
 
-      - name: Verify Ansible Playbook Syntax & Dry-Run
+      - name: Verify Ansible Playbook Syntax & Execute Provisioning
         run: |
           ansible-playbook -i ansible/inventory ansible/playbook.yml --syntax-check
+          ansible-playbook -i ansible/inventory ansible/playbook.yml
 
   # =========================================================================
   # STAGE 3: Docker Build & Verification
