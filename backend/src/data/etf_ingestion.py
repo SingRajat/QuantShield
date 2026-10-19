@@ -1,6 +1,6 @@
 import yfinance as yf
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import logging
 from typing import Dict, Any
@@ -68,19 +68,39 @@ class ETFDataFetcher:
         if not (0.95 <= total_weight <= 1.05):
             logger.warning(f"Total weights sum to {total_weight}. Ensure weights are normalized to 1.0.")
 
-        # Fetch Data
-        end_date = datetime.today()
-        start_date = end_date - relativedelta(years=self.years)
+        # Fetch Data - honor reporting_date if provided, else default to today
+        today_dt = datetime.today().date()
+        rep_date_str = holdings_input.get("reporting_date")
+        if rep_date_str:
+            try:
+                as_of_dt = datetime.strptime(str(rep_date_str).strip(), "%Y-%m-%d").date()
+            except ValueError:
+                raise ValueError(f"Invalid reporting_date format: {rep_date_str}. Expected YYYY-MM-DD.")
+            if as_of_dt > today_dt:
+                raise ValueError(f"reporting_date cannot be in the future: {as_of_dt} > {today_dt}.")
+        else:
+            as_of_dt = today_dt
+
+        start_date = as_of_dt - relativedelta(years=self.years)
+        end_date = as_of_dt + timedelta(days=1)  # Yahoo Finance end parameter is exclusive
         
-        logger.info(f"Fetching data for {len(tickers_to_fetch)} underlying stocks from {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+        logger.info(f"Fetching data for {len(tickers_to_fetch)} underlying stocks from {start_date} to {end_date} (as-of {as_of_dt})")
         
         try:
             # yfinance returns a MultiIndex DataFrame if multiple tickers are provided
-            data = yf.download(tickers_to_fetch, start=start_date, end=end_date, progress=False)
+            data = yf.download(
+                tickers_to_fetch, 
+                start=start_date.strftime("%Y-%m-%d"), 
+                end=end_date.strftime("%Y-%m-%d"), 
+                progress=False
+            )
             
             # Error checking: yfinance might download empty data if no tickers are valid
             if data.empty:
-                raise ValueError("Downloaded data is completely empty. Please verify tickers.")
+                raise ValueError(f"Downloaded data is completely empty between {start_date} and {as_of_dt}. Please verify tickers.")
+            
+            # Defensive guard: crop any timestamps strictly greater than as_of_dt
+            data = data[data.index.date <= as_of_dt]
             
             # Extract 'Adj Close' or 'Close' robustly
             if isinstance(data.columns, pd.MultiIndex):
@@ -107,20 +127,13 @@ class ETFDataFetcher:
                 else:
                     raise ValueError("Neither 'Adj Close' nor 'Close' found in downloaded data.")
             
-            # Handle missing or delisted tickers gracefully
+            # Handle missing or delisted tickers strictly (fail closed per QS-06)
             missing_tickers = [t for t in tickers_to_fetch if t not in df.columns or df[t].isna().all()]
             if missing_tickers:
-                 logger.warning(f"Failed to fetch data for {missing_tickers}. Dropping them and re-normalizing weights.")
-                 df = df.drop(columns=[t for t in missing_tickers if t in df.columns])
-                 for t in missing_tickers:
-                     if t in weights:
-                         del weights[t]
-                 if not weights:
-                     raise ValueError("All requested tickers failed to download or are delisted.")
-                 
-                 # Re-normalize weights
-                 total_w = sum(weights.values())
-                 weights = {t: w / total_w for t, w in weights.items()}
+                raise ValueError(
+                    f"Failed to fetch market data for required tickers: {missing_tickers}. "
+                    f"Verify ticker symbols on Yahoo Finance or replace them."
+                )
 
             # Data Integrity: Forward fill short gaps (holidays/weekends) up to 5 days.
             # Do NOT bfill(): leaving leading missing values as NaN ensures pre-IPO/late-listing periods
