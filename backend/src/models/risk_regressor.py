@@ -120,6 +120,7 @@ class RiskRegressor:
         test_true_list = []
         test_ewma_list = []
         fold_summaries = []
+        optimal_iters = []
         
         fold = 1
         for train_idx, test_idx in cv.split(df):
@@ -136,6 +137,23 @@ class RiskRegressor:
                 f"Test Date_t min={df.iloc[test_idx]['Date_t'].min().strftime('%Y-%m-%d')}"
             )
             
+            # QS-07 Fix: Carve an inner chronological validation split from training dates for early stopping
+            # Outer test fold (X_test, Y_test) is strictly preserved for untouched out-of-fold evaluation.
+            train_dates = pd.to_datetime(df.iloc[train_idx]["Date_t"])
+            train_target_ends = pd.to_datetime(df.iloc[train_idx]["Target_End"]) if "Target_End" in df.columns else train_dates + pd.Timedelta(days=28)
+            unique_tr_dates = train_dates.drop_duplicates().sort_values().reset_index(drop=True)
+            
+            n_tr_dates = len(unique_tr_dates)
+            val_split_pos = int(n_tr_dates * 0.85)
+            inner_val_start_date = unique_tr_dates.iloc[val_split_pos]
+            
+            # Purge inner train samples whose forward Target_End overlaps inner validation start date
+            inner_tr_mask = (train_dates < inner_val_start_date) & (train_target_ends < inner_val_start_date)
+            inner_val_mask = train_dates >= inner_val_start_date
+            
+            inner_tr_pos = np.where(inner_tr_mask)[0]
+            inner_val_pos = np.where(inner_val_mask)[0]
+            
             fold_model = CatBoostRegressor(
                 iterations=self.iterations,
                 depth=self.depth,
@@ -144,8 +162,17 @@ class RiskRegressor:
                 random_seed=self.random_seed,
                 verbose=0
             )
-            fold_model.fit(X_train, Y_train, eval_set=(X_test, Y_test), early_stopping_rounds=20)
             
+            if len(inner_tr_pos) > 0 and len(inner_val_pos) > 0:
+                X_inner_tr, Y_inner_tr = X_train.iloc[inner_tr_pos], Y_train.iloc[inner_tr_pos]
+                X_inner_val, Y_inner_val = X_train.iloc[inner_val_pos], Y_train.iloc[inner_val_pos]
+                fold_model.fit(X_inner_tr, Y_inner_tr, eval_set=(X_inner_val, Y_inner_val), early_stopping_rounds=20)
+                optimal_iters.append(fold_model.get_best_iteration())
+            else:
+                fold_model.fit(X_train, Y_train)
+                optimal_iters.append(self.iterations)
+            
+            # Predict strictly out-of-fold on the untouched test fold
             preds = fold_model.predict(X_test)
             test_preds_list.append(preds)
             test_true_list.append(Y_test.values)
@@ -179,8 +206,17 @@ class RiskRegressor:
         if len(test_preds_list) == 0:
             raise RuntimeError("No test folds were evaluated during cross-validation.")
             
-        # Fit final model on the entire dataset for serving/inference
-        logger.info("Fitting production model on full dataset...")
+        # Fit final model on the entire dataset for serving/inference using median N*
+        serving_iters = int(np.median(optimal_iters)) if optimal_iters else self.iterations
+        logger.info(f"Fitting production serving model with median N*={serving_iters} iterations on full dataset...")
+        self.model = CatBoostRegressor(
+            iterations=serving_iters,
+            depth=self.depth,
+            learning_rate=self.learning_rate,
+            loss_function='MultiRMSE',
+            random_seed=self.random_seed,
+            verbose=0
+        )
         self.model.fit(X, Y)
         self.is_fitted = True
         
@@ -241,7 +277,13 @@ class RiskRegressor:
             "total_evaluated_observations": len(all_true),
             "vol_forecast": vol_metrics,
             "maxdd_forecast": maxdd_metrics,
-            "folds": fold_summaries
+            "folds": fold_summaries,
+            "oof_predictions": {
+                "true_vol": true_vol.tolist(),
+                "pred_vol": pred_vol.tolist(),
+                "true_maxdd": true_maxdd.tolist(),
+                "pred_maxdd": pred_maxdd.tolist()
+            }
         }
 
     def predict(self, features_df: pd.DataFrame) -> np.ndarray:
