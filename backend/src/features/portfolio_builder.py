@@ -69,5 +69,5 @@ class PortfolioBuilder:
                 raise ValueError(f"Ticker '{ticker}' not found in available price data.")
                 
         total_weight = sum(weights.values())
-        if not np.isclose(total_weight, 1.0, rtol=1e-5):
+        if not np.isclose(total_weight, 1.0, rtol=1e-4, atol=1e-4):
             raise ValueError(f"Portfolio weights must sum to 1.0. Current sum: {total_weight}")
