@@ -102,16 +102,11 @@ def calibrate_risk_probabilities(pred_vol: float) -> Dict[str, float]:
 def get_calibration_metadata() -> Dict[str, Any]:
     """Returns empirical calibration metadata and audit metrics for institutional transparency."""
     meta = {
-        "method": "Empirical Out-Of-Fold Softmax Calibration (Platt Scaling)",
-        "sample_size": 4917,
+        "method": "Empirical Out-Of-Fold Softmax Calibration & Inverted Residual Corridor",
         "cross_validation": "5-Fold Purged & Embargoed Walk-Forward Time Series",
-        "brier_score": 0.5398,
-        "heuristic_brier_score": 0.7210,
-        "brier_improvement_absolute": -0.1812,
-        "log_loss": 0.8900,
-        "heuristic_log_loss": 1.2062,
-        "log_loss_improvement_absolute": -0.3162,
-        "expected_calibration_error": 0.0306,
+        "evaluation_partition": "Independent Chronological Holdout (Fold 5)",
+        "target_coverage": 0.90,
+        "acceptable_corridor": [0.85, 0.95],
         "regime_thresholds": {
             "Low": "Forward_Vol < 0.16",
             "Medium": "0.16 <= Forward_Vol < 0.25",

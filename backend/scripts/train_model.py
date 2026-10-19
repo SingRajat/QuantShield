@@ -79,6 +79,12 @@ def parse_args():
         default=None,
         help="Path to existing training_dataset.csv to derive features from without refetching from yfinance"
     )
+    parser.add_argument(
+        "--promote",
+        action="store_true",
+        default=False,
+        help="Atomically promote validated model and calibration bundle to production (backend/src/models/)"
+    )
     return parser.parse_args()
 
 def main():
@@ -237,7 +243,7 @@ def main():
         json.dump(meta_payload, f, indent=2)
     logger.info(f"Saved continuous model evaluation metadata to: {metadata_path}")
 
-    # 6. Fit & Export Calibration Artifacts (Phase 4.1)
+    # 6. Fit & Export Calibration Artifacts (Phase 4.1 & R-02 Independent Chronological Holdout)
     if "oof_predictions" in eval_results:
         from sklearn.linear_model import LogisticRegression
         import numpy as np
@@ -247,18 +253,39 @@ def main():
         pred_vol = np.array(oof_data["pred_vol"])
         true_maxdd = np.array(oof_data["true_maxdd"])
         pred_maxdd = np.array(oof_data["pred_maxdd"])
+        fold_ids = np.array(oof_data.get("fold_id", []))
 
-        err_vol = pred_vol - true_vol
-        err_maxdd = pred_maxdd - true_maxdd
+        # R-02 Fix: Chronological Holdout Partition
+        # Development set: Folds 1 to K-1 (e.g. Folds 1-4)
+        # Independent holdout test set: Final Fold K (e.g. Fold 5)
+        unique_folds = np.unique(fold_ids) if len(fold_ids) > 0 else np.array([])
+        if len(unique_folds) > 1:
+            holdout_fold = unique_folds[-1]
+            dev_mask = fold_ids != holdout_fold
+            holdout_mask = fold_ids == holdout_fold
+            logger.info(f"Calibration partition: Folds {unique_folds[:-1].tolist()} used for fitting (N={np.sum(dev_mask)}), Fold {holdout_fold} reserved for independent holdout evaluation (N={np.sum(holdout_mask)})")
+        else:
+            # Fallback to 80/20 chronological split if fold_ids not present
+            n_samples = len(true_vol)
+            split_idx = int(n_samples * 0.8)
+            dev_mask = np.zeros(n_samples, dtype=bool)
+            dev_mask[:split_idx] = True
+            holdout_mask = ~dev_mask
+            logger.info(f"Calibration partition: Chronological 80/20 split used (dev N={np.sum(dev_mask)}, holdout N={np.sum(holdout_mask)})")
 
-        vol_q05 = float(np.percentile(err_vol, 5))
-        vol_q95 = float(np.percentile(err_vol, 95))
-        maxdd_q05 = float(np.percentile(err_maxdd, 5))
-        maxdd_q95 = float(np.percentile(err_maxdd, 95))
+        # Fit empirical quantiles strictly on development fold residuals
+        dev_err_vol = pred_vol[dev_mask] - true_vol[dev_mask]
+        dev_err_maxdd = pred_maxdd[dev_mask] - true_maxdd[dev_mask]
 
-        regimes = np.where(true_vol < 0.16, 0, np.where(true_vol < 0.25, 1, 2))
+        vol_q05 = float(np.percentile(dev_err_vol, 5))
+        vol_q95 = float(np.percentile(dev_err_vol, 95))
+        maxdd_q05 = float(np.percentile(dev_err_maxdd, 5))
+        maxdd_q95 = float(np.percentile(dev_err_maxdd, 95))
+
+        # Fit Platt scaling (multinomial logistic regression) strictly on development fold predictions
+        dev_regimes = np.where(true_vol[dev_mask] < 0.16, 0, np.where(true_vol[dev_mask] < 0.25, 1, 2))
         clf = LogisticRegression(solver="lbfgs", max_iter=1000)
-        clf.fit(pred_vol.reshape(-1, 1), regimes)
+        clf.fit(pred_vol[dev_mask].reshape(-1, 1), dev_regimes)
 
         classes = ["Low", "Medium", "High"]
         calib_coeffs = {}
@@ -268,8 +295,53 @@ def main():
                 "slope": float(clf.coef_[i][0])
             }
 
-        vol_cov = float(np.mean((true_vol >= (pred_vol - vol_q95)) & (true_vol <= (pred_vol - vol_q05))))
-        mdd_cov = float(np.mean((true_maxdd >= (pred_maxdd - maxdd_q95)) & (true_maxdd <= (pred_maxdd - maxdd_q05))))
+        # Evaluate empirical coverage strictly on the independent chronological holdout set
+        h_true_vol = true_vol[holdout_mask]
+        h_pred_vol = pred_vol[holdout_mask]
+        h_true_maxdd = true_maxdd[holdout_mask]
+        h_pred_maxdd = pred_maxdd[holdout_mask]
+
+        vol_cov_holdout = float(np.mean((h_true_vol >= (h_pred_vol - vol_q95)) & (h_true_vol <= (h_pred_vol - vol_q05))))
+        mdd_cov_holdout = float(np.mean((h_true_maxdd >= (h_pred_maxdd - maxdd_q95)) & (h_true_maxdd <= (h_pred_maxdd - maxdd_q05))))
+
+        # Evaluate Brier Score, Multiclass Log Loss, and ECE on holdout data
+        h_regimes = np.where(h_true_vol < 0.16, 0, np.where(h_true_vol < 0.25, 1, 2))
+        h_probs = clf.predict_proba(h_pred_vol.reshape(-1, 1))
+
+        n_h = len(h_regimes)
+        y_one_hot = np.zeros((n_h, 3))
+        for i, r in enumerate(h_regimes):
+            y_one_hot[i, r] = 1.0
+
+        brier_score = float(np.mean(np.sum((h_probs - y_one_hot) ** 2, axis=1)))
+
+        dev_priors = np.bincount(dev_regimes, minlength=3) / len(dev_regimes)
+        heuristic_probs = np.tile(dev_priors, (n_h, 1))
+        heuristic_brier = float(np.mean(np.sum((heuristic_probs - y_one_hot) ** 2, axis=1)))
+        brier_lift = brier_score - heuristic_brier
+
+        eps = 1e-15
+        h_probs_clipped = np.clip(h_probs, eps, 1.0 - eps)
+        log_loss_score = float(-np.mean(np.sum(y_one_hot * np.log(h_probs_clipped), axis=1)))
+        heuristic_probs_clipped = np.clip(heuristic_probs, eps, 1.0 - eps)
+        heuristic_log_loss = float(-np.mean(np.sum(y_one_hot * np.log(heuristic_probs_clipped), axis=1)))
+        log_loss_lift = log_loss_score - heuristic_log_loss
+
+        # Expected Calibration Error (ECE) across 10 confidence bins
+        confidences = np.max(h_probs, axis=1)
+        predictions = np.argmax(h_probs, axis=1)
+        accuracies = (predictions == h_regimes)
+        bins = np.linspace(0, 1, 11)
+        ece = 0.0
+        for b_idx in range(len(bins) - 1):
+            bin_mask = (confidences > bins[b_idx]) & (confidences <= bins[b_idx + 1])
+            if np.any(bin_mask):
+                bin_acc = np.mean(accuracies[bin_mask])
+                bin_conf = np.mean(confidences[bin_mask])
+                ece += (np.sum(bin_mask) / n_h) * abs(bin_acc - bin_conf)
+        ece = float(ece)
+
+        validation_status = "AUDIT_PASSED" if (0.85 <= vol_cov_holdout <= 0.95) else "REVIEW_NEEDED"
 
         calib_payload = {
             "method": "Empirical Out-Of-Fold Softmax Calibration & Inverted Residual Corridor",
@@ -281,12 +353,21 @@ def main():
                 "maxdd_err_q95": maxdd_q95
             },
             "metrics": {
-                "sample_size": len(true_vol),
-                "vol_empirical_coverage": vol_cov,
-                "maxdd_empirical_coverage": mdd_cov,
+                "sample_size_total": len(true_vol),
+                "sample_size_dev": int(np.sum(dev_mask)),
+                "sample_size_holdout": int(n_h),
+                "vol_empirical_coverage": vol_cov_holdout,
+                "maxdd_empirical_coverage": mdd_cov_holdout,
                 "target_coverage": 0.90,
                 "acceptable_corridor": [0.85, 0.95],
-                "validation_status": "AUDIT_PASSED" if (0.85 <= vol_cov <= 0.95) else "REVIEW_NEEDED"
+                "brier_score": round(brier_score, 4),
+                "heuristic_brier_score": round(heuristic_brier, 4),
+                "brier_improvement_absolute": round(brier_lift, 4),
+                "log_loss": round(log_loss_score, 4),
+                "heuristic_log_loss": round(heuristic_log_loss, 4),
+                "log_loss_improvement_absolute": round(log_loss_lift, 4),
+                "expected_calibration_error": round(ece, 4),
+                "validation_status": validation_status
             }
         }
 
@@ -295,14 +376,30 @@ def main():
             json.dump(calib_payload, f, indent=2)
         logger.info(f"Saved calibration artifact to: {calib_path}")
 
-        # Sync artifacts to production model root backend/src/models/ if applicable
+        # R-01 Fix: Guarded, atomic promotion to production root backend/src/models/
         prod_dir = project_root / 'backend' / 'src' / 'models'
-        if prod_dir.exists() and output_dir != prod_dir:
-            import shutil
-            shutil.copy(model_path, prod_dir / 'saved_model.cbm')
-            shutil.copy(calib_path, prod_dir / 'calibration.json')
-            shutil.copy(metadata_path, prod_dir / 'model_metadata.json')
-            logger.info(f"Synced production bundle (saved_model.cbm, calibration.json, model_metadata.json) to {prod_dir}")
+        if args.promote and prod_dir.exists() and output_dir != prod_dir:
+            if validation_status != "AUDIT_PASSED":
+                logger.warning(
+                    f"Production promotion blocked: validation_status is '{validation_status}', not 'AUDIT_PASSED'. "
+                    f"Holdout coverage {vol_cov_holdout:.4f} is outside acceptable corridor [0.85, 0.95]."
+                )
+            else:
+                import shutil
+                staging_dir = prod_dir / '.staging_bundle'
+                staging_dir.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.copy2(model_path, staging_dir / 'saved_model.cbm')
+                    shutil.copy2(calib_path, staging_dir / 'calibration.json')
+                    shutil.copy2(metadata_path, staging_dir / 'model_metadata.json')
+                    for item in ['saved_model.cbm', 'calibration.json', 'model_metadata.json']:
+                        (staging_dir / item).replace(prod_dir / item)
+                    logger.info(f"Atomically promoted production bundle (saved_model.cbm, calibration.json, model_metadata.json) to {prod_dir}")
+                finally:
+                    if staging_dir.exists():
+                        shutil.rmtree(staging_dir, ignore_errors=True)
+        elif not args.promote and output_dir != prod_dir:
+            logger.info("Artifacts preserved in experiment directory. Specify --promote to promote to production.")
 
 if __name__ == "__main__":
     main()
