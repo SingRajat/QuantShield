@@ -1276,11 +1276,11 @@ with tab_overview:
                 top_stock = max_h["ticker"].replace(".NS", "")
                 top_share = max_h["weight"] * 100
 
-            # Benchmark comparison text (QS-14 & R-03: trailing 21-day volatility calculation & escaping)
+            # Benchmark comparison text (QS-14 & R-03 & QS-R2: trailing 21-day volatility calculation & escaping)
             real_bm_vol = None
-            bm_returns_api = data.get("benchmark_returns", [])
-            if len(bm_returns_api) >= 21:
-                bm_ret_series = pd.Series(bm_returns_api).dropna()
+            bm_daily = data.get("benchmark_daily_returns", [])
+            if len(bm_daily) >= 21:
+                bm_ret_series = pd.Series(bm_daily).dropna()
                 real_bm_vol = float(bm_ret_series.iloc[-21:].std() * np.sqrt(252))
             elif len(benchmark_cum) >= 22:
                 # Recover daily returns from cumulative returns: (1 + C_t) / (1 + C_{t-1}) - 1

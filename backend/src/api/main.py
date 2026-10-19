@@ -305,6 +305,7 @@ def predict_risk(request: PortfolioRequest):
         # Benchmark comparison series
         benchmark_ticker = request.benchmark
         benchmark_cum = [0.0] * len(inference_returns)
+        benchmark_daily = [0.0] * len(inference_returns)
         market_returns = None
         try:
             bm_raw = yf.download(
@@ -332,6 +333,7 @@ def predict_risk(request: PortfolioRequest):
                 market_returns = bm_daily.reindex(inference_returns.index).ffill(limit=5)
                 aligned_bm_returns = market_returns.fillna(0.0)
                 benchmark_cum = ((1 + aligned_bm_returns).cumprod() - 1).tolist()
+                benchmark_daily = aligned_bm_returns.tolist()
         except Exception as e:
             logger.warning(f"Error fetching benchmark {benchmark_ticker}: {e}")
             
@@ -393,8 +395,10 @@ def predict_risk(request: PortfolioRequest):
             "dashboard_explanations": dashboard_explanations,
             "portfolio_returns": portfolio_cum,
             "benchmark_returns": benchmark_cum,
+            "benchmark_daily_returns": benchmark_daily,
             "benchmark_name": benchmark_ticker,
-            "returns_data": returns_data
+            "returns_data": returns_data,
+            "artifact_id": model_metadata.get("artifact_id", "v1.2-prod")
         })
         
     except Exception as e:
