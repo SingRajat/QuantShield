@@ -178,20 +178,39 @@ def generate_oof_predictions(
         inner_tr_pos = np.where(inner_tr_mask)[0]
         inner_val_pos = np.where(inner_val_mask)[0]
         
-        # Fit fold CatBoost MultiRMSE model
-        fold_model = CatBoostRegressor(
-            iterations=iterations,
-            depth=depth,
-            learning_rate=learning_rate,
-            loss_function='MultiRMSE',
-            random_seed=random_seed,
-            verbose=0
-        )
         if len(inner_tr_pos) > 0 and len(inner_val_pos) > 0:
             X_inner_tr, Y_inner_tr = X_train.iloc[inner_tr_pos], Y_train.iloc[inner_tr_pos]
             X_inner_val, Y_inner_val = X_train.iloc[inner_val_pos], Y_train.iloc[inner_val_pos]
-            fold_model.fit(X_inner_tr, Y_inner_tr, eval_set=(X_inner_val, Y_inner_val), early_stopping_rounds=20)
+            inner_model = CatBoostRegressor(
+                iterations=iterations,
+                depth=depth,
+                learning_rate=learning_rate,
+                loss_function='MultiRMSE',
+                random_seed=random_seed,
+                verbose=0
+            )
+            inner_model.fit(X_inner_tr, Y_inner_tr, eval_set=(X_inner_val, Y_inner_val), early_stopping_rounds=20)
+            best_iter = inner_model.get_best_iteration()
+            tree_count = int(getattr(inner_model, "tree_count_", best_iter + 1))
+            
+            fold_model = CatBoostRegressor(
+                iterations=tree_count,
+                depth=depth,
+                learning_rate=learning_rate,
+                loss_function='MultiRMSE',
+                random_seed=random_seed,
+                verbose=0
+            )
+            fold_model.fit(X_train, Y_train)
         else:
+            fold_model = CatBoostRegressor(
+                iterations=iterations,
+                depth=depth,
+                learning_rate=learning_rate,
+                loss_function='MultiRMSE',
+                random_seed=random_seed,
+                verbose=0
+            )
             fold_model.fit(X_train, Y_train)
         
         preds = fold_model.predict(X_test)

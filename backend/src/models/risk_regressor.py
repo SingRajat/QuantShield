@@ -119,6 +119,7 @@ class RiskRegressor:
         test_preds_list = []
         test_true_list = []
         test_ewma_list = []
+        test_folds_list = []
         fold_summaries = []
         optimal_iters = []
         
@@ -166,9 +167,38 @@ class RiskRegressor:
             if len(inner_tr_pos) > 0 and len(inner_val_pos) > 0:
                 X_inner_tr, Y_inner_tr = X_train.iloc[inner_tr_pos], Y_train.iloc[inner_tr_pos]
                 X_inner_val, Y_inner_val = X_train.iloc[inner_val_pos], Y_train.iloc[inner_val_pos]
-                fold_model.fit(X_inner_tr, Y_inner_tr, eval_set=(X_inner_val, Y_inner_val), early_stopping_rounds=20)
-                optimal_iters.append(fold_model.get_best_iteration())
+                inner_model = CatBoostRegressor(
+                    iterations=self.iterations,
+                    depth=self.depth,
+                    learning_rate=self.learning_rate,
+                    loss_function='MultiRMSE',
+                    random_seed=self.random_seed,
+                    verbose=0
+                )
+                inner_model.fit(X_inner_tr, Y_inner_tr, eval_set=(X_inner_val, Y_inner_val), early_stopping_rounds=20)
+                best_iter = inner_model.get_best_iteration()
+                tree_count = int(getattr(inner_model, "tree_count_", best_iter + 1))
+                optimal_iters.append(tree_count)
+                
+                # Refit on full outer training fold (X_train, Y_train) with selected tree count
+                fold_model = CatBoostRegressor(
+                    iterations=tree_count,
+                    depth=self.depth,
+                    learning_rate=self.learning_rate,
+                    loss_function='MultiRMSE',
+                    random_seed=self.random_seed,
+                    verbose=0
+                )
+                fold_model.fit(X_train, Y_train)
             else:
+                fold_model = CatBoostRegressor(
+                    iterations=self.iterations,
+                    depth=self.depth,
+                    learning_rate=self.learning_rate,
+                    loss_function='MultiRMSE',
+                    random_seed=self.random_seed,
+                    verbose=0
+                )
                 fold_model.fit(X_train, Y_train)
                 optimal_iters.append(self.iterations)
             
@@ -176,6 +206,7 @@ class RiskRegressor:
             preds = fold_model.predict(X_test)
             test_preds_list.append(preds)
             test_true_list.append(Y_test.values)
+            test_folds_list.append(np.full(len(test_idx), fold, dtype=int))
             
             # Per-fold metrics
             fold_vol_mae = float(mean_absolute_error(Y_test.values[:, 0], preds[:, 0]))
@@ -224,15 +255,17 @@ class RiskRegressor:
         all_preds = np.vstack(test_preds_list)
         all_true = np.vstack(test_true_list)
         all_ewma = np.concatenate(test_ewma_list) if len(test_ewma_list) > 0 else None
+        all_folds = np.concatenate(test_folds_list)
         
-        return self._calculate_pooled_metrics(all_true, all_preds, all_ewma, fold_summaries)
+        return self._calculate_pooled_metrics(all_true, all_preds, all_ewma, fold_summaries, all_folds)
         
     def _calculate_pooled_metrics(
         self, 
         all_true: np.ndarray, 
         all_preds: np.ndarray, 
         all_ewma: Optional[np.ndarray],
-        fold_summaries: List[Dict[str, Any]]
+        fold_summaries: List[Dict[str, Any]],
+        all_folds: Optional[np.ndarray] = None
     ) -> Dict[str, Any]:
         """Calculates pooled out-of-fold regression metrics strictly over evaluated test samples."""
         
@@ -282,7 +315,8 @@ class RiskRegressor:
                 "true_vol": true_vol.tolist(),
                 "pred_vol": pred_vol.tolist(),
                 "true_maxdd": true_maxdd.tolist(),
-                "pred_maxdd": pred_maxdd.tolist()
+                "pred_maxdd": pred_maxdd.tolist(),
+                "fold_id": all_folds.tolist() if all_folds is not None else []
             }
         }
 
