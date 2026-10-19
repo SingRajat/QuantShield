@@ -2,33 +2,42 @@
   "method": "Empirical Out-Of-Fold Softmax Calibration & Inverted Residual Corridor",
   "coefficients": {
     "Low": {
-      "intercept": 2.6355207105692036,
-      "slope": -12.201466682388409
+      "intercept": 2.440162865148822,
+      "slope": -11.334176149237353
     },
     "Medium": {
-      "intercept": 0.45036488869364916,
-      "slope": -0.1273620796609047
+      "intercept": 0.5180925525298111,
+      "slope": -0.4508084485086603
     },
     "High": {
-      "intercept": -3.0858855992634027,
-      "slope": 12.328828762049334
+      "intercept": -2.9582554176796307,
+      "slope": 11.784984597746138
     }
   },
   "residual_quantiles": {
-    "vol_err_q05": -0.11081266279996127,
-    "vol_err_q95": 0.10607487496306883,
-    "maxdd_err_q05": -0.061561790417542644,
-    "maxdd_err_q95": 0.05032538971551405
+    "vol_err_q05": -0.11289439815649355,
+    "vol_err_q95": 0.10518949770950985,
+    "maxdd_err_q05": -0.061812332701938755,
+    "maxdd_err_q95": 0.04980312317863287
   },
   "metrics": {
-    "sample_size": 4917,
-    "vol_empirical_coverage": 0.8999389871873094,
-    "maxdd_empirical_coverage": 0.8999389871873094,
+    "sample_size_total": 4917,
+    "sample_size_dev": 3957,
+    "sample_size_holdout": 960,
+    "vol_empirical_coverage": 0.925,
+    "maxdd_empirical_coverage": 0.9354166666666667,
     "target_coverage": 0.9,
     "acceptable_corridor": [
       0.85,
       0.95
     ],
+    "brier_score": 0.5597,
+    "heuristic_brier_score": 0.652,
+    "brier_improvement_absolute": -0.0923,
+    "log_loss": 0.917,
+    "heuristic_log_loss": 1.0762,
+    "log_loss_improvement_absolute": -0.1592,
+    "expected_calibration_error": 0.0655,
     "validation_status": "AUDIT_PASSED"
   }
 }
