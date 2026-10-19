@@ -514,6 +514,8 @@ if "pending_csv_holdings" in st.session_state:
         st.session_state[f"slider_{idx}"] = float(item["weight"])
     for extra_idx in range(len(csv_holdings), 50):
         st.session_state.pop(f"slider_{extra_idx}", None)
+    # R-04 Fix: Invalidate previous forecast data on CSV upload
+    st.session_state.pop("forecast_data", None)
 
 # Helper function: Auto-balancing simplex redistribution
 def rebalance_from_slider(changed_idx):
@@ -758,12 +760,22 @@ with st.sidebar.expander("Bulk CSV Upload", expanded=False):
             try:
                 df_csv = pd.read_csv(io.BytesIO(file_bytes))
                 if "Ticker" in df_csv.columns and "Weight" in df_csv.columns:
-                    st.session_state["pending_csv_holdings"] = [
-                        {"ticker": str(r["Ticker"]).strip().upper(), "weight": float(r["Weight"])}
-                        for _, r in df_csv.iterrows()
-                    ]
-                    st.session_state["last_uploaded_csv_hash"] = file_hash
-                    st.rerun()
+                    valid_holdings = []
+                    for _, r in df_csv.iterrows():
+                        t_raw = str(r["Ticker"]).strip().upper()
+                        if not re.match(r'^[A-Z0-9.\-_^]{1,20}$', t_raw):
+                            raise ValueError(f"Invalid ticker format in CSV: '{t_raw}'. Only letters, numbers, and .-_^ allowed (max 20 chars).")
+                        try:
+                            w_val = float(r["Weight"])
+                            if math.isnan(w_val) or math.isinf(w_val) or w_val < 0.0:
+                                raise ValueError(f"Invalid weight for {t_raw}: must be non-negative finite number.")
+                        except (ValueError, TypeError):
+                            raise ValueError(f"Non-numeric weight value for {t_raw}")
+                        valid_holdings.append({"ticker": t_raw, "weight": w_val})
+                    if valid_holdings:
+                        st.session_state["pending_csv_holdings"] = valid_holdings
+                        st.session_state["last_uploaded_csv_hash"] = file_hash
+                        st.rerun()
             except Exception as exc:
                 st.error(f"CSV error: {exc}")
 
@@ -1264,10 +1276,16 @@ with tab_overview:
                 top_stock = max_h["ticker"].replace(".NS", "")
                 top_share = max_h["weight"] * 100
 
-            # Benchmark comparison text (QS-14: trailing 21-day volatility calculation & escaping)
+            # Benchmark comparison text (QS-14 & R-03: trailing 21-day volatility calculation & escaping)
             real_bm_vol = None
-            if len(benchmark_cum) >= 22:
-                bm_ret_series = pd.Series(benchmark_cum).pct_change().dropna()
+            bm_returns_api = data.get("benchmark_returns", [])
+            if len(bm_returns_api) >= 21:
+                bm_ret_series = pd.Series(bm_returns_api).dropna()
+                real_bm_vol = float(bm_ret_series.iloc[-21:].std() * np.sqrt(252))
+            elif len(benchmark_cum) >= 22:
+                # Recover daily returns from cumulative returns: (1 + C_t) / (1 + C_{t-1}) - 1
+                bm_wealth = 1.0 + pd.Series(benchmark_cum)
+                bm_ret_series = bm_wealth.pct_change().dropna()
                 if len(bm_ret_series) >= 21:
                     real_bm_vol = float(bm_ret_series.iloc[-21:].std() * np.sqrt(252))
 
@@ -1621,7 +1639,7 @@ with tab_stress:
                         </div>
                         <div style="display: flex; justify-content: space-between;">
                             <span style="color: #8B949E;">Biggest Stock Dip:</span>
-                            <span class="mono-val" style="color: #F47067;">{worst_t} ({worst_drop:.1f}% drop)</span>
+                            <span class="mono-val" style="color: #F47067;">{html.escape(worst_t)} ({worst_drop:.1f}% drop)</span>
                         </div>
                     </div>
                 </div>
@@ -1644,9 +1662,10 @@ with tab_stress:
                 else:
                     status_badge = f'<span style="color: #D29922; font-weight: 600;">Listed in {ipo_year} (Proxy Beta Used)</span>'
 
+                escaped_t_clean = html.escape(t_clean)
                 table_rows.append(
                     f'<tr>'
-                    f'<td style="padding: 8px 12px; font-family: \'JetBrains Mono\', monospace; color: #E6EDF3; font-weight: 600;">{t_clean}</td>'
+                    f'<td style="padding: 8px 12px; font-family: \'JetBrains Mono\', monospace; color: #E6EDF3; font-weight: 600;">{escaped_t_clean}</td>'
                     f'<td style="padding: 8px 12px; font-family: \'JetBrains Mono\', monospace; color: #D4A853;">{w:.1f}%</td>'
                     f'<td style="padding: 8px 12px; font-family: \'JetBrains Mono\', monospace; color: #E6EDF3;">{b:.2f}x</td>'
                     f'<td style="padding: 8px 12px; font-family: \'JetBrains Mono\', monospace; color: #F47067; font-weight: 600;">{a_drop:.1f}%</td>'
