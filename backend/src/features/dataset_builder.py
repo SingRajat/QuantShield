@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 import logging
-from typing import Dict, Tuple, Optional, List
+from typing import Any, Dict, Tuple, Optional, List
 
 logger = logging.getLogger(__name__)
 
@@ -85,9 +85,10 @@ class DatasetBuilder:
     @staticmethod
     def _compute_maxdd(returns: pd.Series) -> float:
         if len(returns) < 5: return np.nan
-        cum_ret = (1.0 + returns).cumprod()
-        running_max = cum_ret.cummax()
-        drawdown = (cum_ret - running_max) / running_max
+        wealth = (1.0 + returns).cumprod()
+        wealth = pd.concat([pd.Series([1.0]), wealth]).reset_index(drop=True)
+        running_max = wealth.cummax()
+        drawdown = (wealth - running_max) / running_max
         return float(abs(drawdown.min())) if len(drawdown) > 0 else 0.0
 
     @staticmethod
@@ -252,19 +253,12 @@ class DatasetBuilder:
         """
         clean_returns = daily_returns.dropna()
         n_days = len(clean_returns)
-        if n_days < cls.WINDOW_LENGTH:
-            raise ValueError(
-                f"Insufficient historical data: {n_days} trading days available, "
-                f"at least {cls.WINDOW_LENGTH} required for rolling risk metrics."
-            )
-            
         min_required = cls.WINDOW_LENGTH + max(cls.LAGS)
         if n_days < min_required:
-            pad_len = min_required - n_days
-            first_val = float(clean_returns.iloc[0])
-            pad_series = pd.Series([first_val] * pad_len, index=pd.date_range(end=clean_returns.index[0] - pd.Timedelta(days=1), periods=pad_len, freq="B"))
-            clean_returns = pd.concat([pad_series, clean_returns])
-            n_days = len(clean_returns)
+            raise ValueError(
+                f"Insufficient historical data: {n_days} trading days available, "
+                f"at least {min_required} required for rolling feature computation with lag structures."
+            )
             
         end_idx = n_days
         current_lookback_returns = clean_returns.iloc[end_idx - cls.WINDOW_LENGTH : end_idx]
