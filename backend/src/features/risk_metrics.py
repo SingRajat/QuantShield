@@ -59,9 +59,12 @@ class RiskFeatureEngineer:
         Calculates the Maximum Drawdown.
         Represents the maximum observed loss linearly from a historical peak.
         """
-        cumulative_returns = (1 + self.portfolio_returns).cumprod()
-        rolling_max = cumulative_returns.cummax()
-        drawdown = (cumulative_returns - rolling_max) / rolling_max
+        if self.portfolio_returns.empty:
+            return 0.0
+        wealth = (1.0 + self.portfolio_returns).cumprod()
+        wealth = pd.concat([pd.Series([1.0]), wealth]).reset_index(drop=True)
+        rolling_max = wealth.cummax()
+        drawdown = (wealth - rolling_max) / rolling_max
         max_drawdown = drawdown.min()
         return float(abs(max_drawdown))
 
