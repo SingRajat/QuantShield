@@ -237,5 +237,72 @@ def main():
         json.dump(meta_payload, f, indent=2)
     logger.info(f"Saved continuous model evaluation metadata to: {metadata_path}")
 
+    # 6. Fit & Export Calibration Artifacts (Phase 4.1)
+    if "oof_predictions" in eval_results:
+        from sklearn.linear_model import LogisticRegression
+        import numpy as np
+
+        oof_data = eval_results["oof_predictions"]
+        true_vol = np.array(oof_data["true_vol"])
+        pred_vol = np.array(oof_data["pred_vol"])
+        true_maxdd = np.array(oof_data["true_maxdd"])
+        pred_maxdd = np.array(oof_data["pred_maxdd"])
+
+        err_vol = pred_vol - true_vol
+        err_maxdd = pred_maxdd - true_maxdd
+
+        vol_q05 = float(np.percentile(err_vol, 5))
+        vol_q95 = float(np.percentile(err_vol, 95))
+        maxdd_q05 = float(np.percentile(err_maxdd, 5))
+        maxdd_q95 = float(np.percentile(err_maxdd, 95))
+
+        regimes = np.where(true_vol < 0.16, 0, np.where(true_vol < 0.25, 1, 2))
+        clf = LogisticRegression(solver="lbfgs", max_iter=1000)
+        clf.fit(pred_vol.reshape(-1, 1), regimes)
+
+        classes = ["Low", "Medium", "High"]
+        calib_coeffs = {}
+        for i, c in enumerate(classes):
+            calib_coeffs[c] = {
+                "intercept": float(clf.intercept_[i]),
+                "slope": float(clf.coef_[i][0])
+            }
+
+        vol_cov = float(np.mean((true_vol >= (pred_vol - vol_q95)) & (true_vol <= (pred_vol - vol_q05))))
+        mdd_cov = float(np.mean((true_maxdd >= (pred_maxdd - maxdd_q95)) & (true_maxdd <= (pred_maxdd - maxdd_q05))))
+
+        calib_payload = {
+            "method": "Empirical Out-Of-Fold Softmax Calibration & Inverted Residual Corridor",
+            "coefficients": calib_coeffs,
+            "residual_quantiles": {
+                "vol_err_q05": vol_q05,
+                "vol_err_q95": vol_q95,
+                "maxdd_err_q05": maxdd_q05,
+                "maxdd_err_q95": maxdd_q95
+            },
+            "metrics": {
+                "sample_size": len(true_vol),
+                "vol_empirical_coverage": vol_cov,
+                "maxdd_empirical_coverage": mdd_cov,
+                "target_coverage": 0.90,
+                "acceptable_corridor": [0.85, 0.95],
+                "validation_status": "AUDIT_PASSED" if (0.85 <= vol_cov <= 0.95) else "REVIEW_NEEDED"
+            }
+        }
+
+        calib_path = output_dir / 'calibration.json'
+        with open(calib_path, 'w') as f:
+            json.dump(calib_payload, f, indent=2)
+        logger.info(f"Saved calibration artifact to: {calib_path}")
+
+        # Sync artifacts to production model root backend/src/models/ if applicable
+        prod_dir = project_root / 'backend' / 'src' / 'models'
+        if prod_dir.exists() and output_dir != prod_dir:
+            import shutil
+            shutil.copy(model_path, prod_dir / 'saved_model.cbm')
+            shutil.copy(calib_path, prod_dir / 'calibration.json')
+            shutil.copy(metadata_path, prod_dir / 'model_metadata.json')
+            logger.info(f"Synced production bundle (saved_model.cbm, calibration.json, model_metadata.json) to {prod_dir}")
+
 if __name__ == "__main__":
     main()

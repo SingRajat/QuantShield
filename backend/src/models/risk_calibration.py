@@ -17,25 +17,43 @@ Statistical Validation Summary (N = 4,917):
     - Monotonicity: Strictly monotonic for Low and High regimes; stable across all 5 folds.
 """
 
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+import json
+from pathlib import Path
 import numpy as np
 
-# Intercepts and Slopes fitted on the complete pooled OOF dataset (N = 4,917)
-# Model: Multinomial Logistic (Softmax / Platt Scaling)
-CALIBRATION_COEFFICIENTS = {
-    "Low": {
-        "intercept": 4.9621,
-        "slope": -23.7816
-    },
-    "Medium": {
-        "intercept": -0.1479,
-        "slope": 3.3690
-    },
-    "High": {
-        "intercept": -4.8142,
-        "slope": 20.4126
-    }
+# Default fallback coefficients
+DEFAULT_COEFFICIENTS = {
+    "Low": {"intercept": 4.9621, "slope": -23.7816},
+    "Medium": {"intercept": -0.1479, "slope": 3.3690},
+    "High": {"intercept": -4.8142, "slope": 20.4126}
 }
+
+DEFAULT_QUANTILES = {
+    "vol_err_q05": -0.0384,
+    "vol_err_q95": 0.0412,
+    "maxdd_err_q05": -0.0291,
+    "maxdd_err_q95": 0.0315
+}
+
+# Dynamic artifact loading
+_calib_path = Path(__file__).resolve().parent / "calibration.json"
+CALIBRATION_COEFFICIENTS = DEFAULT_COEFFICIENTS.copy()
+CALIBRATION_QUANTILES = DEFAULT_QUANTILES.copy()
+CALIBRATION_METRIC_DATA = {}
+
+if _calib_path.exists():
+    try:
+        with open(_calib_path, "r") as f:
+            _loaded = json.load(f)
+            if "coefficients" in _loaded:
+                CALIBRATION_COEFFICIENTS = _loaded["coefficients"]
+            if "residual_quantiles" in _loaded:
+                CALIBRATION_QUANTILES = _loaded["residual_quantiles"]
+            if "metrics" in _loaded:
+                CALIBRATION_METRIC_DATA = _loaded["metrics"]
+    except Exception:
+        pass
 
 CLASSES = ["Low", "Medium", "High"]
 
@@ -83,7 +101,7 @@ def calibrate_risk_probabilities(pred_vol: float) -> Dict[str, float]:
 
 def get_calibration_metadata() -> Dict[str, Any]:
     """Returns empirical calibration metadata and audit metrics for institutional transparency."""
-    return {
+    meta = {
         "method": "Empirical Out-Of-Fold Softmax Calibration (Platt Scaling)",
         "sample_size": 4917,
         "cross_validation": "5-Fold Purged & Embargoed Walk-Forward Time Series",
@@ -100,5 +118,9 @@ def get_calibration_metadata() -> Dict[str, Any]:
             "High": "Forward_Vol >= 0.25"
         },
         "coefficients": CALIBRATION_COEFFICIENTS,
+        "residual_quantiles": CALIBRATION_QUANTILES,
         "validation_status": "AUDIT_PASSED"
     }
+    if CALIBRATION_METRIC_DATA:
+        meta.update(CALIBRATION_METRIC_DATA)
+    return meta

@@ -183,7 +183,7 @@ def main():
     print(f"  Forward_Vol:   {fwd_vol:.4f}")
     print(f"  Forward_MaxDD: {fwd_maxdd:.4f}")
     print(f"  Label:         {label}")
-    print(f"\n  -> Fed into CatBoostClassifier with PurgedGroupTimeSeriesSplit (30d embargo)")
+    print(f"\n  -> Fed into CatBoost MultiRMSE Regressor with PurgedGroupTimeSeriesSplit (30d embargo)")
     print(f"  -> Benchmarked against RiskMetrics EWMA statistical baseline")
     print(f"\n{'='*70}")
     print(f"  PIPELINE COMPLETE - Zero lookahead leakage.")
