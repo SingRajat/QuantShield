@@ -71,7 +71,7 @@ def parse_args():
         "--output-dir",
         type=str,
         default=None,
-        help="Directory to save artifacts. Defaults to backend/src/models for v1_baseline, or backend/src/models/experiments/{feature_set}"
+        help="Directory to save artifacts. Defaults to backend/src/models/experiments/{feature_set}"
     )
     parser.add_argument(
         "--from-base-dataset",
@@ -91,15 +91,15 @@ def main():
     args = parse_args()
     logger.info(f"Starting QuantShield Continuous Risk Forecasting Pipeline [Feature Set: {args.feature_set}]...")
 
-    # Determine output directory
+    # Determine output directory (QS-R1 Fix: Always isolate experiment artifacts; never default directly into production)
     if args.output_dir:
         output_dir = Path(args.output_dir)
-    elif args.feature_set in ["v1_baseline", "family_a"]:
-        output_dir = project_root / 'backend' / 'src' / 'models'
     elif args.feature_set in ["family_b", "v1_1"]:
         output_dir = project_root / 'backend' / 'src' / 'models' / 'experiments' / 'family_b'
     elif args.feature_set in ["family_b_ewma", "family_b_plus_ewma"]:
         output_dir = project_root / 'backend' / 'src' / 'models' / 'experiments' / 'family_b_ewma'
+    elif args.feature_set in ["v1_baseline", "family_a"]:
+        output_dir = project_root / 'backend' / 'src' / 'models' / 'experiments' / 'v1_baseline'
     else:
         output_dir = project_root / 'backend' / 'src' / 'models' / 'experiments' / args.feature_set
 
@@ -207,10 +207,16 @@ def main():
     regressor.model.save_model(str(model_path))
     logger.info(f"Serialized trained CatBoost MultiRMSE model to: {model_path}")
 
+    # QS-R8: Generate immutable artifact ID from model binary hash
+    import hashlib
+    with open(model_path, 'rb') as f:
+        artifact_id = hashlib.sha256(f.read()).hexdigest()[:12]
+
     # Save experiment config
     config_payload = {
         "experiment_name": f"Experiment_{args.feature_set}",
         "feature_set": args.feature_set,
+        "artifact_id": artifact_id,
         "feature_count": len(regressor.features),
         "features": regressor.features,
         "targets": RiskRegressor.TARGETS,
@@ -231,6 +237,10 @@ def main():
     # Save model transparency metadata for API & UI consumption
     metadata_path = output_dir / 'model_metadata.json'
     meta_payload = {
+        "artifact_id": artifact_id,
+        "build_timestamp": pd.Timestamp.now().isoformat(),
+        "model_version": "V1.2",
+        "evaluation_protocol": "5-fold chronological walk-forward out-of-fold cross-validation",
         "features": regressor.features,
         "targets": RiskRegressor.TARGETS,
         "forecast_horizon_days": DatasetBuilder.FORECAST_HORIZON,
@@ -243,7 +253,7 @@ def main():
         json.dump(meta_payload, f, indent=2)
     logger.info(f"Saved continuous model evaluation metadata to: {metadata_path}")
 
-    # 6. Fit & Export Calibration Artifacts (Phase 4.1 & R-02 Independent Chronological Holdout)
+    # 6. Fit & Export Calibration Artifacts (Phase 4.1 & Walk-Forward OOF Validation)
     if "oof_predictions" in eval_results:
         from sklearn.linear_model import LogisticRegression
         import numpy as np
@@ -255,23 +265,23 @@ def main():
         pred_maxdd = np.array(oof_data["pred_maxdd"])
         fold_ids = np.array(oof_data.get("fold_id", []))
 
-        # R-02 Fix: Chronological Holdout Partition
-        # Development set: Folds 1 to K-1 (e.g. Folds 1-4)
-        # Independent holdout test set: Final Fold K (e.g. Fold 5)
+        # QS-R3: Chronological Walk-Forward Final-Fold Out-of-Fold Evaluation Partition
+        # Development folds: Folds 1 to K-1 (e.g. Folds 1-4) used for fitting calibration parameters
+        # Final evaluation fold: Final Fold K (e.g. Fold 5) reserved for walk-forward OOF evaluation
         unique_folds = np.unique(fold_ids) if len(fold_ids) > 0 else np.array([])
         if len(unique_folds) > 1:
-            holdout_fold = unique_folds[-1]
-            dev_mask = fold_ids != holdout_fold
-            holdout_mask = fold_ids == holdout_fold
-            logger.info(f"Calibration partition: Folds {unique_folds[:-1].tolist()} used for fitting (N={np.sum(dev_mask)}), Fold {holdout_fold} reserved for independent holdout evaluation (N={np.sum(holdout_mask)})")
+            eval_fold = unique_folds[-1]
+            dev_mask = fold_ids != eval_fold
+            eval_mask = fold_ids == eval_fold
+            logger.info(f"Calibration partition: Folds {unique_folds[:-1].tolist()} used for fitting (N={np.sum(dev_mask)}), Fold {eval_fold} reserved for walk-forward OOF evaluation (N={np.sum(eval_mask)})")
         else:
             # Fallback to 80/20 chronological split if fold_ids not present
             n_samples = len(true_vol)
             split_idx = int(n_samples * 0.8)
             dev_mask = np.zeros(n_samples, dtype=bool)
             dev_mask[:split_idx] = True
-            holdout_mask = ~dev_mask
-            logger.info(f"Calibration partition: Chronological 80/20 split used (dev N={np.sum(dev_mask)}, holdout N={np.sum(holdout_mask)})")
+            eval_mask = ~dev_mask
+            logger.info(f"Calibration partition: Chronological 80/20 split used (dev N={np.sum(dev_mask)}, eval N={np.sum(eval_mask)})")
 
         # Fit empirical quantiles strictly on development fold residuals
         dev_err_vol = pred_vol[dev_mask] - true_vol[dev_mask]
@@ -284,6 +294,15 @@ def main():
 
         # Fit Platt scaling (multinomial logistic regression) strictly on development fold predictions
         dev_regimes = np.where(true_vol[dev_mask] < 0.16, 0, np.where(true_vol[dev_mask] < 0.25, 1, 2))
+        
+        # QS-R7 Fix: Verify all 3 regimes exist in development folds before multinomial fitting
+        unique_dev_regimes = np.unique(dev_regimes)
+        if len(unique_dev_regimes) < 3:
+            raise ValueError(
+                f"Calibration error: Development folds contain only {len(unique_dev_regimes)} regime class(es) "
+                f"({unique_dev_regimes.tolist()}), but 3 are required for 3-class multinomial calibration."
+            )
+
         clf = LogisticRegression(solver="lbfgs", max_iter=1000)
         clf.fit(pred_vol[dev_mask].reshape(-1, 1), dev_regimes)
 
@@ -295,16 +314,16 @@ def main():
                 "slope": float(clf.coef_[i][0])
             }
 
-        # Evaluate empirical coverage strictly on the independent chronological holdout set
-        h_true_vol = true_vol[holdout_mask]
-        h_pred_vol = pred_vol[holdout_mask]
-        h_true_maxdd = true_maxdd[holdout_mask]
-        h_pred_maxdd = pred_maxdd[holdout_mask]
+        # Evaluate empirical coverage strictly on the walk-forward evaluation fold
+        h_true_vol = true_vol[eval_mask]
+        h_pred_vol = pred_vol[eval_mask]
+        h_true_maxdd = true_maxdd[eval_mask]
+        h_pred_maxdd = pred_maxdd[eval_mask]
 
-        vol_cov_holdout = float(np.mean((h_true_vol >= (h_pred_vol - vol_q95)) & (h_true_vol <= (h_pred_vol - vol_q05))))
-        mdd_cov_holdout = float(np.mean((h_true_maxdd >= (h_pred_maxdd - maxdd_q95)) & (h_true_maxdd <= (h_pred_maxdd - maxdd_q05))))
+        vol_cov_oof = float(np.mean((h_true_vol >= (h_pred_vol - vol_q95)) & (h_true_vol <= (h_pred_vol - vol_q05))))
+        mdd_cov_oof = float(np.mean((h_true_maxdd >= (h_pred_maxdd - maxdd_q95)) & (h_true_maxdd <= (h_pred_maxdd - maxdd_q05))))
 
-        # Evaluate Brier Score, Multiclass Log Loss, and ECE on holdout data
+        # Evaluate Brier Score, Multiclass Log Loss, and ECE on evaluation fold
         h_regimes = np.where(h_true_vol < 0.16, 0, np.where(h_true_vol < 0.25, 1, 2))
         h_probs = clf.predict_proba(h_pred_vol.reshape(-1, 1))
 
@@ -341,10 +360,12 @@ def main():
                 ece += (np.sum(bin_mask) / n_h) * abs(bin_acc - bin_conf)
         ece = float(ece)
 
-        validation_status = "AUDIT_PASSED" if (0.85 <= vol_cov_holdout <= 0.95) else "REVIEW_NEEDED"
+        # QS-R4 Fix: Enforce acceptance corridor [0.85, 0.95] on BOTH Volatility and MaxDD empirical coverage
+        validation_status = "AUDIT_PASSED" if (0.85 <= vol_cov_oof <= 0.95 and 0.85 <= mdd_cov_oof <= 0.95) else "REVIEW_NEEDED"
 
         calib_payload = {
-            "method": "Empirical Out-Of-Fold Softmax Calibration & Inverted Residual Corridor",
+            "method": "5-Fold Walk-Forward Out-Of-Fold Softmax Calibration & Inverted Residual Corridor",
+            "artifact_id": artifact_id,
             "coefficients": calib_coeffs,
             "residual_quantiles": {
                 "vol_err_q05": vol_q05,
@@ -355,9 +376,9 @@ def main():
             "metrics": {
                 "sample_size_total": len(true_vol),
                 "sample_size_dev": int(np.sum(dev_mask)),
-                "sample_size_holdout": int(n_h),
-                "vol_empirical_coverage": vol_cov_holdout,
-                "maxdd_empirical_coverage": mdd_cov_holdout,
+                "sample_size_oof_eval": int(n_h),
+                "vol_empirical_coverage": vol_cov_oof,
+                "maxdd_empirical_coverage": mdd_cov_oof,
                 "target_coverage": 0.90,
                 "acceptable_corridor": [0.85, 0.95],
                 "brier_score": round(brier_score, 4),
@@ -367,6 +388,7 @@ def main():
                 "heuristic_log_loss": round(heuristic_log_loss, 4),
                 "log_loss_improvement_absolute": round(log_loss_lift, 4),
                 "expected_calibration_error": round(ece, 4),
+                "evaluation_protocol": "Chronological Walk-Forward Final-Fold OOF Validation",
                 "validation_status": validation_status
             }
         }
@@ -376,25 +398,46 @@ def main():
             json.dump(calib_payload, f, indent=2)
         logger.info(f"Saved calibration artifact to: {calib_path}")
 
-        # R-01 Fix: Guarded, atomic promotion to production root backend/src/models/
+        # QS-R1 & QS-R5 Fix: Guarded promotion to production root with versioned bundle & atomic manifest
         prod_dir = project_root / 'backend' / 'src' / 'models'
         if args.promote and prod_dir.exists() and output_dir != prod_dir:
             if validation_status != "AUDIT_PASSED":
                 logger.warning(
                     f"Production promotion blocked: validation_status is '{validation_status}', not 'AUDIT_PASSED'. "
-                    f"Holdout coverage {vol_cov_holdout:.4f} is outside acceptable corridor [0.85, 0.95]."
+                    f"Holdout coverage: Vol={vol_cov_oof:.4f}, MaxDD={mdd_cov_oof:.4f} (corridor [0.85, 0.95])."
                 )
             else:
                 import shutil
+                # 1. Archive into immutable versioned bundle directory
+                timestamp_str = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+                version_dir = prod_dir / 'versions' / f"{timestamp_str}_{artifact_id}"
+                version_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(model_path, version_dir / 'saved_model.cbm')
+                shutil.copy2(calib_path, version_dir / 'calibration.json')
+                shutil.copy2(metadata_path, version_dir / 'model_metadata.json')
+
+                # 2. Stage active files and manifest atomically into production root
                 staging_dir = prod_dir / '.staging_bundle'
                 staging_dir.mkdir(parents=True, exist_ok=True)
                 try:
                     shutil.copy2(model_path, staging_dir / 'saved_model.cbm')
                     shutil.copy2(calib_path, staging_dir / 'calibration.json')
                     shutil.copy2(metadata_path, staging_dir / 'model_metadata.json')
-                    for item in ['saved_model.cbm', 'calibration.json', 'model_metadata.json']:
+                    manifest_payload = {
+                        "active_version": version_dir.name,
+                        "artifact_id": artifact_id,
+                        "promoted_at": pd.Timestamp.now().isoformat(),
+                        "feature_set": args.feature_set,
+                        "vol_empirical_coverage": vol_cov_oof,
+                        "maxdd_empirical_coverage": mdd_cov_oof,
+                        "validation_status": validation_status
+                    }
+                    with open(staging_dir / 'active_manifest.json', 'w') as mf:
+                        json.dump(manifest_payload, mf, indent=2)
+
+                    for item in ['saved_model.cbm', 'calibration.json', 'model_metadata.json', 'active_manifest.json']:
                         (staging_dir / item).replace(prod_dir / item)
-                    logger.info(f"Atomically promoted production bundle (saved_model.cbm, calibration.json, model_metadata.json) to {prod_dir}")
+                    logger.info(f"Promoted versioned bundle {version_dir.name} and updated active manifest in {prod_dir}")
                 finally:
                     if staging_dir.exists():
                         shutil.rmtree(staging_dir, ignore_errors=True)
