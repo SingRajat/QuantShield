@@ -23,7 +23,7 @@
   "metrics": {
     "sample_size_total": 4917,
     "sample_size_dev": 3957,
-    "sample_size_holdout": 960,
+    "sample_size_oof_eval": 960,
     "vol_empirical_coverage": 0.925,
     "maxdd_empirical_coverage": 0.9354166666666667,
     "target_coverage": 0.9,
@@ -38,6 +38,7 @@
     "heuristic_log_loss": 1.0762,
     "log_loss_improvement_absolute": -0.1592,
     "expected_calibration_error": 0.0655,
+    "evaluation_protocol": "Chronological Walk-Forward Final-Fold OOF Validation",
     "validation_status": "AUDIT_PASSED"
   }
 }

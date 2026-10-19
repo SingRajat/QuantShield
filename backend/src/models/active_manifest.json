@@ -1,0 +1,9 @@
+{
+  "active_version": "v1.2_02fbf502f5fe",
+  "artifact_id": "02fbf502f5fe",
+  "promoted_at": "2026-10-20T04:20:00.000000",
+  "feature_set": "family_b_ewma",
+  "vol_empirical_coverage": 0.925,
+  "maxdd_empirical_coverage": 0.9354166666666667,
+  "validation_status": "AUDIT_PASSED"
+}

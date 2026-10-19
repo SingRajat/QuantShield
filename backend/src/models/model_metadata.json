@@ -1,4 +1,7 @@
 {
+  "artifact_id": "02fbf502f5fe",
+  "model_version": "V1.2",
+  "evaluation_protocol": "5-fold chronological walk-forward out-of-fold cross-validation",
   "features": [
     "Vol_t",
     "Vol_t5",
