@@ -1,7 +1,13 @@
+import os
 import sys
+import math
+import re
+from datetime import datetime
 from pathlib import Path
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Dict, Any, Optional
 from catboost import CatBoostRegressor
 import numpy as np
@@ -31,32 +37,115 @@ from backend.src.models.llm_agent import MockLLMAgent
 
 logger = logging.getLogger(__name__)
 
+def _sanitize_floats(obj: Any) -> Any:
+    """Recursively replaces NaN and Inf with None for RFC 7159 compliant JSON."""
+    if isinstance(obj, (float, np.floating)):
+        return None if (math.isnan(obj) or math.isinf(obj)) else float(obj)
+    if isinstance(obj, (int, np.integer)):
+        return int(obj)
+    if isinstance(obj, np.ndarray):
+        return _sanitize_floats(obj.tolist())
+    if isinstance(obj, dict):
+        return {k: _sanitize_floats(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_sanitize_floats(v) for v in obj]
+    return obj
+
 app = FastAPI(
     title="QuantShield Continuous Risk Forecasting API",
     description="Multi-output continuous risk forecasting engine (V1.2: 16-Feature Multi-Horizon Dynamics + EWMA).",
     version="1.2.0"
 )
 
-# Enable CORS for all origins (Streamlit Cloud, local, mobile, etc.)
+# Fail-safe CORS: reject wildcard with credentials
+raw_origins = os.environ.get("CORS_ORIGINS", "http://localhost:8501,http://127.0.0.1:8501")
+allowed_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
+if "*" in allowed_origins:
+    raise RuntimeError("Insecure CORS configuration: Wildcard '*' cannot be used with credentials.")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", "X-API-Key", "X-Gateway-Secret"],
 )
 
+@app.middleware("http")
+async def enforce_gateway_boundary(request: Request, call_next):
+    # Only enforce gateway boundary in production mode
+    if os.environ.get("ENVIRONMENT") == "production":
+        expected_secret = os.environ.get("GATEWAY_SECRET")
+        if not expected_secret or request.headers.get("X-Gateway-Secret") != expected_secret:
+            return JSONResponse(
+                status_code=403, 
+                content={"detail": "Direct unauthenticated access blocked. Requests must transit through verified API Gateway."}
+            )
+    return await call_next(request)
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    errors = exc.errors()
+    msg = "; ".join([str(e.get("msg", "")) for e in errors])
+    if "weight" in msg.lower():
+        return JSONResponse(status_code=400, content={"detail": f"Portfolio weights must sum to ~1.0: {msg}"})
+    return JSONResponse(status_code=400, content={"detail": msg})
+
 class Holding(BaseModel):
-    ticker: str
-    weight: float
+    ticker: str = Field(..., min_length=1, max_length=20)
+    weight: float = Field(..., ge=0.0, le=1.0)
+
+    @field_validator("ticker")
+    @classmethod
+    def validate_ticker(cls, v):
+        v = str(v).strip().upper()
+        if not re.match(r'^[A-Z0-9.\-_^]{1,20}$', v):
+            raise ValueError(f"Invalid ticker format: {v}")
+        return v
 
 class PortfolioRequest(BaseModel):
-    etf_name: str
-    reporting_date: str
-    holdings: List[Holding]
-    benchmark: str = "^NSEI"
+    etf_name: str = Field(..., max_length=100)
+    reporting_date: Optional[str] = None
+    holdings: List[Holding] = Field(..., min_length=1, max_length=50)
+    benchmark: str = Field(default="^NSEI", max_length=20)
+    @field_validator("reporting_date")
+    @classmethod
+    def validate_reporting_date(cls, v):
+        if v is not None and str(v).strip():
+            v_str = str(v).strip()
+            try:
+                dt = datetime.strptime(v_str, "%Y-%m-%d").date()
+            except ValueError:
+                raise ValueError(f"Invalid reporting_date format: {v_str}. Expected YYYY-MM-DD.")
+            today_dt = datetime.today().date()
+            if dt > today_dt:
+                raise ValueError(f"reporting_date cannot be in the future: {dt} > {today_dt}.")
+            return v_str
+        return None
 
-# Preload V1.2 candidate/production model and metadata at startup
+    @field_validator("benchmark")
+    @classmethod
+    def validate_benchmark(cls, v):
+        v = str(v).strip().upper()
+        if not re.match(r'^[A-Z0-9.\-_^]{1,20}$', v):
+            raise ValueError(f"Invalid benchmark ticker: {v}")
+        return v
+
+    @model_validator(mode="after")
+    def validate_portfolio(self):
+        # Reject duplicate tickers (canonicalized to uppercase)
+        tickers = [h.ticker for h in self.holdings]
+        if len(tickers) != len(set(tickers)):
+            raise ValueError("Duplicate tickers detected in holdings.")
+        total_weight = sum(h.weight for h in self.holdings)
+        if not (0.90 <= total_weight <= 1.10):
+            raise ValueError(f"Holdings weights must sum to ~1.0, got {total_weight:.4f}")
+        # Normalize weights strictly to 1.0
+        for h in self.holdings:
+            h.weight = float(h.weight / total_weight)
+        return self
+
+# Preload candidate/production model and metadata at startup atomically
 model_path = project_root / 'backend' / 'src' / 'models' / 'saved_model.cbm'
 if not model_path.exists():
     model_path = project_root / 'backend' / 'src' / 'models' / 'experiments' / 'family_b_ewma' / 'saved_model.cbm'
@@ -69,11 +158,13 @@ sklearn_model = None
 model_metadata = {}
 
 try:
-    sklearn_model = CatBoostRegressor()
-    sklearn_model.load_model(str(model_path))
+    _candidate = CatBoostRegressor()
+    _candidate.load_model(str(model_path))
+    sklearn_model = _candidate
     logger.info(f"Loaded CatBoost MultiRMSE model from {model_path}")
     print(f"Loaded CatBoost MultiRMSE model from {model_path}")
 except Exception as e:
+    sklearn_model = None
     logger.error(f"Failed to load CatBoost model: {e}")
     print(f"Failed to load CatBoost model from {model_path}: {e}")
 
@@ -111,28 +202,26 @@ async def root():
 
 @app.get("/api/v1/risk/health")
 async def health_check():
+    if sklearn_model is None:
+        return {"status": "degraded", "model_loaded": False, "feature_count": 0, "features": []}
     return {
         "status": "ok", 
-        "model_loaded": sklearn_model is not None,
-        "feature_count": len(sklearn_model.feature_names_) if sklearn_model else 0,
-        "features": list(sklearn_model.feature_names_) if sklearn_model else []
+        "model_loaded": True,
+        "feature_count": len(sklearn_model.feature_names_),
+        "features": list(sklearn_model.feature_names_)
     }
 
 @app.post("/api/v1/risk/predict")
 def predict_risk(request: PortfolioRequest):
-    if not sklearn_model:
-        raise HTTPException(status_code=500, detail="RiskRegressor model is not loaded.")
+    if sklearn_model is None:
+        raise HTTPException(
+            status_code=503, 
+            detail="RiskRegressor model is not loaded or service is degraded.",
+            headers={"Retry-After": "30"}
+        )
         
     try:
-        # 1. Validate Weights 
-        total_weight = sum([h.weight for h in request.holdings])
-        if not (0.95 <= total_weight <= 1.05):
-            raise HTTPException(
-                status_code=400, 
-                detail=f"Portfolio weights must sum to ~1.0. Provided sum: {total_weight:.4f}"
-            )
-            
-        # 2. Transform request into ingestion format
+        # Transform request into ingestion format (weights already validated & normalized by Pydantic)
         holdings_input = {
             "etf_name": request.etf_name,
             "reporting_date": request.reporting_date,
@@ -265,7 +354,7 @@ def predict_risk(request: PortfolioRequest):
             risk_class, features_dict, portfolio_cum[-1], benchmark_cum[-1]
         )
         
-        return {
+        return _sanitize_floats({
             "model_version": "V1.2 (Family B + EWMA)",
             "forecast_horizon_days": 21,
             "forward_volatility": round(pred_fwd_vol, 4),
@@ -306,7 +395,7 @@ def predict_risk(request: PortfolioRequest):
             "benchmark_returns": benchmark_cum,
             "benchmark_name": benchmark_ticker,
             "returns_data": returns_data
-        }
+        })
         
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
