@@ -163,6 +163,21 @@ def generate_oof_predictions(
         X_train, Y_train = X.iloc[train_idx], Y.iloc[train_idx]
         X_test, Y_test = X.iloc[test_idx], Y.iloc[test_idx]
         
+        # QS-07 Fix: Carve inner chronological validation split from training dates for early stopping
+        train_dates = pd.to_datetime(df.iloc[train_idx]["Date_t"])
+        train_target_ends = pd.to_datetime(df.iloc[train_idx]["Target_End"]) if "Target_End" in df.columns else train_dates + pd.Timedelta(days=28)
+        unique_tr_dates = train_dates.drop_duplicates().sort_values().reset_index(drop=True)
+        
+        n_tr_dates = len(unique_tr_dates)
+        val_split_pos = int(n_tr_dates * 0.85)
+        inner_val_start_date = unique_tr_dates.iloc[val_split_pos]
+        
+        inner_tr_mask = (train_dates < inner_val_start_date) & (train_target_ends < inner_val_start_date)
+        inner_val_mask = train_dates >= inner_val_start_date
+        
+        inner_tr_pos = np.where(inner_tr_mask)[0]
+        inner_val_pos = np.where(inner_val_mask)[0]
+        
         # Fit fold CatBoost MultiRMSE model
         fold_model = CatBoostRegressor(
             iterations=iterations,
@@ -172,7 +187,12 @@ def generate_oof_predictions(
             random_seed=random_seed,
             verbose=0
         )
-        fold_model.fit(X_train, Y_train, eval_set=(X_test, Y_test), early_stopping_rounds=20)
+        if len(inner_tr_pos) > 0 and len(inner_val_pos) > 0:
+            X_inner_tr, Y_inner_tr = X_train.iloc[inner_tr_pos], Y_train.iloc[inner_tr_pos]
+            X_inner_val, Y_inner_val = X_train.iloc[inner_val_pos], Y_train.iloc[inner_val_pos]
+            fold_model.fit(X_inner_tr, Y_inner_tr, eval_set=(X_inner_val, Y_inner_val), early_stopping_rounds=20)
+        else:
+            fold_model.fit(X_train, Y_train)
         
         preds = fold_model.predict(X_test)
         
