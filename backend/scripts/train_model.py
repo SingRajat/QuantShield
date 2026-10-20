@@ -91,9 +91,15 @@ def main():
     args = parse_args()
     logger.info(f"Starting QuantShield Continuous Risk Forecasting Pipeline [Feature Set: {args.feature_set}]...")
 
-    # Determine output directory (QS-R1 Fix: Always isolate experiment artifacts; never default directly into production)
+    # Determine output directory (QS-R1 Fix: Always isolate experiment artifacts; never default or write directly into production)
+    prod_dir = (project_root / 'backend' / 'src' / 'models').resolve()
     if args.output_dir:
-        output_dir = Path(args.output_dir)
+        output_dir = Path(args.output_dir).resolve()
+        if output_dir == prod_dir:
+            raise ValueError(
+                "Direct write to production directory (backend/src/models) via --output-dir is prohibited. "
+                "Train into an experiment or staging directory, and pass --promote after audit validation passes."
+            )
     elif args.feature_set in ["family_b", "v1_1"]:
         output_dir = project_root / 'backend' / 'src' / 'models' / 'experiments' / 'family_b'
     elif args.feature_set in ["family_b_ewma", "family_b_plus_ewma"]:
@@ -360,8 +366,13 @@ def main():
                 ece += (np.sum(bin_mask) / n_h) * abs(bin_acc - bin_conf)
         ece = float(ece)
 
-        # QS-R4 Fix: Enforce acceptance corridor [0.85, 0.95] on BOTH Volatility and MaxDD empirical coverage
-        validation_status = "AUDIT_PASSED" if (0.85 <= vol_cov_oof <= 0.95 and 0.85 <= mdd_cov_oof <= 0.95) else "REVIEW_NEEDED"
+        # QS-R4 Fix: Enforce multi-criteria audit gate:
+        # 1. Empirical coverage for both Volatility and Max Drawdown within [0.85, 0.95]
+        # 2. Probability calibration Brier score improves upon naive baseline (brier_lift <= 0.0)
+        # 3. Expected Calibration Error (ECE) is contained within acceptable tolerance (ECE <= 0.15)
+        coverage_passed = (0.85 <= vol_cov_oof <= 0.95) and (0.85 <= mdd_cov_oof <= 0.95)
+        calibration_passed = (brier_lift <= 0.0) and (ece <= 0.15)
+        validation_status = "AUDIT_PASSED" if (coverage_passed and calibration_passed) else "REVIEW_NEEDED"
 
         calib_payload = {
             "method": "5-Fold Walk-Forward Out-Of-Fold Softmax Calibration & Inverted Residual Corridor",
@@ -398,13 +409,13 @@ def main():
             json.dump(calib_payload, f, indent=2)
         logger.info(f"Saved calibration artifact to: {calib_path}")
 
-        # QS-R1 & QS-R5 Fix: Guarded promotion to production root with versioned bundle & atomic manifest
-        prod_dir = project_root / 'backend' / 'src' / 'models'
+        # QS-R1 & QS-R5 Fix: Guarded promotion to production root with versioned bundle & active manifest
+        prod_dir = (project_root / 'backend' / 'src' / 'models').resolve()
         if args.promote and prod_dir.exists() and output_dir != prod_dir:
             if validation_status != "AUDIT_PASSED":
                 logger.warning(
                     f"Production promotion blocked: validation_status is '{validation_status}', not 'AUDIT_PASSED'. "
-                    f"Holdout coverage: Vol={vol_cov_oof:.4f}, MaxDD={mdd_cov_oof:.4f} (corridor [0.85, 0.95])."
+                    f"Metrics: Vol_Cov={vol_cov_oof:.4f}, MaxDD_Cov={mdd_cov_oof:.4f}, Brier_Lift={brier_lift:.4f}, ECE={ece:.4f}."
                 )
             else:
                 import shutil
@@ -416,7 +427,7 @@ def main():
                 shutil.copy2(calib_path, version_dir / 'calibration.json')
                 shutil.copy2(metadata_path, version_dir / 'model_metadata.json')
 
-                # 2. Stage active files and manifest atomically into production root
+                # 2. Stage active files and manifest into production root
                 staging_dir = prod_dir / '.staging_bundle'
                 staging_dir.mkdir(parents=True, exist_ok=True)
                 try:
@@ -430,6 +441,8 @@ def main():
                         "feature_set": args.feature_set,
                         "vol_empirical_coverage": vol_cov_oof,
                         "maxdd_empirical_coverage": mdd_cov_oof,
+                        "brier_improvement_absolute": round(brier_lift, 4),
+                        "expected_calibration_error": round(ece, 4),
                         "validation_status": validation_status
                     }
                     with open(staging_dir / 'active_manifest.json', 'w') as mf:

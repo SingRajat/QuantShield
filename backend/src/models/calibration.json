@@ -1,5 +1,6 @@
 {
-  "method": "Empirical Out-Of-Fold Softmax Calibration & Inverted Residual Corridor",
+  "method": "5-Fold Walk-Forward Out-Of-Fold Softmax Calibration & Inverted Residual Corridor",
+  "artifact_id": "02fbf502f5fe",
   "coefficients": {
     "Low": {
       "intercept": 2.440162865148822,
