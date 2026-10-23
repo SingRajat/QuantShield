@@ -16,52 +16,31 @@ class DatasetBuilder:
     STEP_SIZE = 21        # ~1 month rolling step
     LAGS = [0, 5, 21, 63] # Lags to compute features at (0 is t)
     
+    _BASELINE_FEATURES = [
+        "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
+        "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63"
+    ]
+    _FAMILY_B_FEATURES = _BASELINE_FEATURES + [
+        "Delta_Vol_5", "Delta_Vol_21", "Delta_Vol_63",
+        "Vol_Ratio_21_63",
+        "Delta_MaxDD_5", "Delta_MaxDD_21", "Delta_MaxDD_63"
+    ]
+    _FAMILY_B_EWMA_FEATURES = _FAMILY_B_FEATURES + ["EWMA_Vol_t"]
+
     FEATURE_SETS = {
-        "v1_baseline": [
-            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
-            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63"
-        ],
-        "family_a": [
-            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
-            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63"
-        ],
-        "family_b": [
-            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
-            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63",
-            "Delta_Vol_5", "Delta_Vol_21", "Delta_Vol_63",
-            "Vol_Ratio_21_63",
-            "Delta_MaxDD_5", "Delta_MaxDD_21", "Delta_MaxDD_63"
-        ],
-        "v1_1": [
-            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
-            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63",
-            "Delta_Vol_5", "Delta_Vol_21", "Delta_Vol_63",
-            "Vol_Ratio_21_63",
-            "Delta_MaxDD_5", "Delta_MaxDD_21", "Delta_MaxDD_63"
-        ],
-        "family_b_ewma": [
-            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
-            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63",
-            "Delta_Vol_5", "Delta_Vol_21", "Delta_Vol_63",
-            "Vol_Ratio_21_63",
-            "Delta_MaxDD_5", "Delta_MaxDD_21", "Delta_MaxDD_63",
-            "EWMA_Vol_t"
-        ],
-        "family_b_plus_ewma": [
-            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
-            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63",
-            "Delta_Vol_5", "Delta_Vol_21", "Delta_Vol_63",
-            "Vol_Ratio_21_63",
-            "Delta_MaxDD_5", "Delta_MaxDD_21", "Delta_MaxDD_63",
-            "EWMA_Vol_t"
-        ]
+        "v1_baseline": _BASELINE_FEATURES,
+        "family_a": _BASELINE_FEATURES,
+        "family_b": _FAMILY_B_FEATURES,
+        "v1_1": _FAMILY_B_FEATURES,
+        "family_b_ewma": _FAMILY_B_EWMA_FEATURES,
+        "family_b_plus_ewma": _FAMILY_B_EWMA_FEATURES
     }
 
     def __init__(
         self, 
         portfolios: Dict[str, pd.DataFrame], 
         feature_set: str = "v1_baseline",
-        **kwargs # Accept legacy kwargs to avoid breaking existing imports/calls during transition
+        **kwargs # Accept legacy kwargs to avoid breaking existing imports/calls
     ):
         """
         Initializes the DatasetBuilder with reconstructed portfolio returns.
@@ -79,12 +58,14 @@ class DatasetBuilder:
 
     @staticmethod
     def _compute_vol(returns: pd.Series) -> float:
-        if len(returns) < 5: return np.nan
+        if len(returns) < 5: 
+            return np.nan
         return float(returns.std() * np.sqrt(252))
 
     @staticmethod
     def _compute_maxdd(returns: pd.Series) -> float:
-        if len(returns) < 5: return np.nan
+        if len(returns) < 5: 
+            return np.nan
         wealth = (1.0 + returns).cumprod()
         wealth = pd.concat([pd.Series([1.0]), wealth]).reset_index(drop=True)
         running_max = wealth.cummax()
@@ -101,6 +82,28 @@ class DatasetBuilder:
         weights /= weights.sum()
         ewma_var = np.sum(weights * (r ** 2))
         return float(np.sqrt(252.0 * ewma_var))
+
+    @classmethod
+    def _extract_lag_features(cls, returns: pd.Series, end_idx: int) -> Tuple[Dict[str, float], bool]:
+        """
+        Computes Vol and MaxDD across LAGS [0, 5, 21, 63] ending at end_idx.
+        Returns a dict of feature values and a boolean indicating whether all were valid.
+        """
+        features = {}
+        for lag in cls.LAGS:
+            lag_end = end_idx - lag
+            lag_start = lag_end - cls.WINDOW_LENGTH
+            if lag_start < 0:
+                return {}, False
+            lag_slice = returns.iloc[lag_start:lag_end]
+            suffix = f"_t{lag}" if lag > 0 else "_t"
+            vol = cls._compute_vol(lag_slice)
+            maxdd = cls._compute_maxdd(lag_slice)
+            if pd.isna(vol) or pd.isna(maxdd):
+                return {}, False
+            features[f"Vol{suffix}"] = vol
+            features[f"MaxDD{suffix}"] = maxdd
+        return features, True
 
     @staticmethod
     def compute_forward_target(future_returns: pd.Series) -> Tuple[float, float]:
@@ -167,41 +170,18 @@ class DatasetBuilder:
                     "EWMA_Vol_t": ewma_vol,
                 }
                 
-                features_valid = True
-                
                 # Compute historical risk at t, t-5, t-21, t-63
-                for lag in self.LAGS:
-                    lag_end = end_idx - lag
-                    lag_start = lag_end - self.WINDOW_LENGTH
-                    
-                    if lag_start < 0:
-                        features_valid = False
-                        break
-                        
-                    lag_returns = daily_returns.iloc[lag_start:lag_end]
-                    
-                    suffix = f"_t{lag}" if lag > 0 else "_t"
-                    vol = self._compute_vol(lag_returns)
-                    maxdd = self._compute_maxdd(lag_returns)
-                    
-                    if pd.isna(vol) or pd.isna(maxdd):
-                        features_valid = False
-                        break
-                        
-                    row[f"Vol{suffix}"] = vol
-                    row[f"MaxDD{suffix}"] = maxdd
-                
-                if drop_incomplete and not features_valid:
+                lag_features, is_valid = self._extract_lag_features(daily_returns, end_idx)
+                if drop_incomplete and not is_valid:
                     continue
+                row.update(lag_features)
                     
                 fwd_vol, fwd_maxdd = self.compute_forward_target(future_returns)
-                
                 if drop_incomplete and (pd.isna(fwd_vol) or pd.isna(fwd_maxdd)):
                     continue
                     
                 row["Forward_Vol"] = fwd_vol
                 row["Forward_MaxDD"] = fwd_maxdd
-                
                 rows.append(row)
                 
         panel_df = pd.DataFrame(rows)
@@ -264,16 +244,12 @@ class DatasetBuilder:
         current_lookback_returns = clean_returns.iloc[end_idx - cls.WINDOW_LENGTH : end_idx]
         ewma_vol = cls._compute_ewma_vol(current_lookback_returns)
         
-        row = {}
-        for lag in cls.LAGS:
-            lag_end = end_idx - lag
-            lag_start = lag_end - cls.WINDOW_LENGTH
-            lag_returns = clean_returns.iloc[lag_start:lag_end]
-            
-            suffix = f"_t{lag}" if lag > 0 else "_t"
-            row[f"Vol{suffix}"] = cls._compute_vol(lag_returns)
-            row[f"MaxDD{suffix}"] = cls._compute_maxdd(lag_returns)
-        row["EWMA_Vol_t"] = ewma_vol
+        row = {"EWMA_Vol_t": ewma_vol}
+        lag_features, is_valid = cls._extract_lag_features(clean_returns, end_idx)
+        if not is_valid:
+            raise ValueError("Unable to compute complete lag features over the historical window.")
+        row.update(lag_features)
+
         df = pd.DataFrame([row])
         if feature_set in ["family_b", "v1_1", "family_b_ewma", "family_b_plus_ewma"]:
             df = cls.add_family_b_features(df)
@@ -286,6 +262,3 @@ class DatasetBuilder:
             "ewma_vol": float(ewma_vol) if not pd.isna(ewma_vol) else 0.0,
             "feature_values": {k: float(v) for k, v in df.iloc[0].to_dict().items()}
         }
-
-
-
