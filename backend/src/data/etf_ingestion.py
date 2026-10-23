@@ -3,9 +3,8 @@ import pandas as pd
 from datetime import datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class ETFDataFetcher:
@@ -16,6 +15,36 @@ class ETFDataFetcher:
     
     def __init__(self, years: int = 5):
         self.years = years
+
+    @staticmethod
+    def _extract_prices(data: pd.DataFrame, tickers: List[str]) -> pd.DataFrame:
+        """
+        Extracts price series from downloaded yfinance DataFrame.
+        Evaluates column counts across the entire frame and breaks ties in favor of 'Adj Close'.
+        """
+        if isinstance(data.columns, pd.MultiIndex):
+            levels = data.columns.get_level_values(0)
+            df_adj = data.xs('Adj Close', axis=1, level=0) if 'Adj Close' in levels else pd.DataFrame()
+            df_close = data.xs('Close', axis=1, level=0) if 'Close' in levels else pd.DataFrame()
+
+            adj_valid = df_adj.dropna(axis=1, how='all').shape[1] if not df_adj.empty else 0
+            close_valid = df_close.dropna(axis=1, how='all').shape[1] if not df_close.empty else 0
+
+            if adj_valid >= close_valid and adj_valid > 0:
+                return df_adj
+            elif close_valid > 0:
+                logger.warning("Using 'Close' instead of 'Adj Close' due to missing data.")
+                return df_close
+            else:
+                raise ValueError("Neither 'Adj Close' nor 'Close' returned valid data.")
+        else:
+            if 'Adj Close' in data.columns:
+                return data['Adj Close'].to_frame(name=tickers[0])
+            elif 'Close' in data.columns:
+                logger.warning("Falling back to 'Close'. 'Adj Close' not found.")
+                return data['Close'].to_frame(name=tickers[0])
+            else:
+                raise ValueError("Neither 'Adj Close' nor 'Close' found in downloaded data.")
         
     def fetch_data(self, holdings_input: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -102,30 +131,8 @@ class ETFDataFetcher:
             # Defensive guard: crop any timestamps strictly greater than as_of_dt
             data = data[data.index.date <= as_of_dt]
             
-            # Extract 'Adj Close' or 'Close' robustly
-            if isinstance(data.columns, pd.MultiIndex):
-                df_adj = data.xs('Adj Close', axis=1, level=0) if 'Adj Close' in data.columns.get_level_values(0) else pd.DataFrame()
-                df_close = data.xs('Close', axis=1, level=0) if 'Close' in data.columns.get_level_values(0) else pd.DataFrame()
-                
-                adj_valid_cols = df_adj.dropna(axis=1, how='all').shape[1] if not df_adj.empty else 0
-                close_valid_cols = df_close.dropna(axis=1, how='all').shape[1] if not df_close.empty else 0
-                
-                if adj_valid_cols >= close_valid_cols and adj_valid_cols > 0:
-                    df = df_adj
-                elif close_valid_cols > 0:
-                    df = df_close
-                    logger.warning("Using 'Close' instead of 'Adj Close' due to missing data.")
-                else:
-                    raise ValueError("Neither 'Adj Close' nor 'Close' returned valid data.")
-            else:
-                # Fallback for single ticker
-                if 'Adj Close' in data.columns:
-                    df = data['Adj Close'].to_frame(name=tickers_to_fetch[0])
-                elif 'Close' in data.columns:
-                    df = data['Close'].to_frame(name=tickers_to_fetch[0])
-                    logger.warning("Falling back to 'Close'. 'Adj Close' not found.")
-                else:
-                    raise ValueError("Neither 'Adj Close' nor 'Close' found in downloaded data.")
+            # Extract 'Adj Close' or 'Close' robustly via tie-breaking helper
+            df = self._extract_prices(data, tickers_to_fetch)
             
             # Handle missing or delisted tickers strictly (fail closed per QS-06)
             missing_tickers = [t for t in tickers_to_fetch if t not in df.columns or df[t].isna().all()]
@@ -147,20 +154,18 @@ class ETFDataFetcher:
 
             logger.info(f"Successfully fetched underlying data. Shape: {df.shape}")
             
-            result = {
+            return {
                 "etf_name": etf_name,
                 "weights": weights,
                 "price_data": df
             }
-            
-            return result
             
         except Exception as e:
             logger.error(f"Error fetching underlying stock data: {str(e)}")
             raise
 
 if __name__ == "__main__":
-    # Example input
+    # Manual verification entry point
     mock_input = {
         "etf_name": "NIFTY_IT",
         "reporting_date": "2023-10-31",
