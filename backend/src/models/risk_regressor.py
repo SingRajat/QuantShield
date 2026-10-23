@@ -1,7 +1,7 @@
 import logging
 import pandas as pd
 import numpy as np
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from catboost import CatBoostRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from scipy.stats import pearsonr
@@ -16,45 +16,24 @@ class RiskRegressor:
     Predicts both Forward_Vol and Forward_MaxDD over a specified horizon.
     """
     
+    _BASELINE_FEATURES = [
+        "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
+        "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63"
+    ]
+    _FAMILY_B_FEATURES = _BASELINE_FEATURES + [
+        "Delta_Vol_5", "Delta_Vol_21", "Delta_Vol_63",
+        "Vol_Ratio_21_63",
+        "Delta_MaxDD_5", "Delta_MaxDD_21", "Delta_MaxDD_63"
+    ]
+    _FAMILY_B_EWMA_FEATURES = _FAMILY_B_FEATURES + ["EWMA_Vol_t"]
+
     FEATURE_SETS = {
-        "v1_baseline": [
-            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
-            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63"
-        ],
-        "family_a": [
-            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
-            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63"
-        ],
-        "family_b": [
-            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
-            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63",
-            "Delta_Vol_5", "Delta_Vol_21", "Delta_Vol_63",
-            "Vol_Ratio_21_63",
-            "Delta_MaxDD_5", "Delta_MaxDD_21", "Delta_MaxDD_63"
-        ],
-        "v1_1": [
-            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
-            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63",
-            "Delta_Vol_5", "Delta_Vol_21", "Delta_Vol_63",
-            "Vol_Ratio_21_63",
-            "Delta_MaxDD_5", "Delta_MaxDD_21", "Delta_MaxDD_63"
-        ],
-        "family_b_ewma": [
-            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
-            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63",
-            "Delta_Vol_5", "Delta_Vol_21", "Delta_Vol_63",
-            "Vol_Ratio_21_63",
-            "Delta_MaxDD_5", "Delta_MaxDD_21", "Delta_MaxDD_63",
-            "EWMA_Vol_t"
-        ],
-        "family_b_plus_ewma": [
-            "Vol_t", "Vol_t5", "Vol_t21", "Vol_t63",
-            "MaxDD_t", "MaxDD_t5", "MaxDD_t21", "MaxDD_t63",
-            "Delta_Vol_5", "Delta_Vol_21", "Delta_Vol_63",
-            "Vol_Ratio_21_63",
-            "Delta_MaxDD_5", "Delta_MaxDD_21", "Delta_MaxDD_63",
-            "EWMA_Vol_t"
-        ]
+        "v1_baseline": _BASELINE_FEATURES,
+        "family_a": _BASELINE_FEATURES,
+        "family_b": _FAMILY_B_FEATURES,
+        "v1_1": _FAMILY_B_FEATURES,
+        "family_b_ewma": _FAMILY_B_EWMA_FEATURES,
+        "family_b_plus_ewma": _FAMILY_B_EWMA_FEATURES
     }
     FEATURES = FEATURE_SETS["family_b_ewma"]
     TARGETS = ["Forward_Vol", "Forward_MaxDD"]
@@ -79,16 +58,64 @@ class RiskRegressor:
         else:
             self.features = self.FEATURE_SETS.get(feature_set, self.FEATURE_SETS["v1_baseline"])
         
-        self.model = CatBoostRegressor(
-            iterations=self.iterations,
+        self.model = self._build_estimator(self.iterations)
+        self.is_fitted = False
+
+    def _build_estimator(self, iterations: Optional[int] = None) -> CatBoostRegressor:
+        """Factory method to construct CatBoost MultiRMSE estimator with uniform hyperparameters."""
+        return CatBoostRegressor(
+            iterations=iterations if iterations is not None else self.iterations,
             depth=self.depth,
             learning_rate=self.learning_rate,
             loss_function='MultiRMSE',
             random_seed=self.random_seed,
             verbose=0
         )
-        self.is_fitted = False
         
+    def _fit_inner_cv_fold(
+        self, 
+        X_train: pd.DataFrame, 
+        Y_train: pd.DataFrame, 
+        df: pd.DataFrame, 
+        train_idx: np.ndarray
+    ) -> Tuple[CatBoostRegressor, int]:
+        """
+        Applies QS-07 inner chronological validation split (85% date threshold)
+        with early stopping to select optimal tree count, then refits on full outer training fold.
+        """
+        train_dates = pd.to_datetime(df.iloc[train_idx]["Date_t"])
+        train_target_ends = pd.to_datetime(df.iloc[train_idx]["Target_End"]) if "Target_End" in df.columns else train_dates + pd.Timedelta(days=28)
+        unique_tr_dates = train_dates.drop_duplicates().sort_values().reset_index(drop=True)
+        
+        n_tr_dates = len(unique_tr_dates)
+        val_split_pos = int(n_tr_dates * 0.85)
+        inner_val_start_date = unique_tr_dates.iloc[val_split_pos]
+        
+        # Purge inner train samples whose forward Target_End overlaps inner validation start date
+        inner_tr_mask = (train_dates < inner_val_start_date) & (train_target_ends < inner_val_start_date)
+        inner_val_mask = train_dates >= inner_val_start_date
+        
+        inner_tr_pos = np.where(inner_tr_mask)[0]
+        inner_val_pos = np.where(inner_val_mask)[0]
+        
+        if len(inner_tr_pos) > 0 and len(inner_val_pos) > 0:
+            X_inner_tr, Y_inner_tr = X_train.iloc[inner_tr_pos], Y_train.iloc[inner_tr_pos]
+            X_inner_val, Y_inner_val = X_train.iloc[inner_val_pos], Y_train.iloc[inner_val_pos]
+            
+            inner_model = self._build_estimator(self.iterations)
+            inner_model.fit(X_inner_tr, Y_inner_tr, eval_set=(X_inner_val, Y_inner_val), early_stopping_rounds=20)
+            best_iter = inner_model.get_best_iteration()
+            tree_count = int(getattr(inner_model, "tree_count_", best_iter + 1))
+            
+            # Refit on full outer training fold with selected tree count
+            fold_model = self._build_estimator(tree_count)
+            fold_model.fit(X_train, Y_train)
+            return fold_model, tree_count
+        else:
+            fold_model = self._build_estimator(self.iterations)
+            fold_model.fit(X_train, Y_train)
+            return fold_model, self.iterations
+
     def train_and_evaluate(
         self, 
         panel_df: pd.DataFrame, 
@@ -138,69 +165,8 @@ class RiskRegressor:
                 f"Test Date_t min={df.iloc[test_idx]['Date_t'].min().strftime('%Y-%m-%d')}"
             )
             
-            # QS-07 Fix: Carve an inner chronological validation split from training dates for early stopping
-            # Outer test fold (X_test, Y_test) is strictly preserved for untouched out-of-fold evaluation.
-            train_dates = pd.to_datetime(df.iloc[train_idx]["Date_t"])
-            train_target_ends = pd.to_datetime(df.iloc[train_idx]["Target_End"]) if "Target_End" in df.columns else train_dates + pd.Timedelta(days=28)
-            unique_tr_dates = train_dates.drop_duplicates().sort_values().reset_index(drop=True)
-            
-            n_tr_dates = len(unique_tr_dates)
-            val_split_pos = int(n_tr_dates * 0.85)
-            inner_val_start_date = unique_tr_dates.iloc[val_split_pos]
-            
-            # Purge inner train samples whose forward Target_End overlaps inner validation start date
-            inner_tr_mask = (train_dates < inner_val_start_date) & (train_target_ends < inner_val_start_date)
-            inner_val_mask = train_dates >= inner_val_start_date
-            
-            inner_tr_pos = np.where(inner_tr_mask)[0]
-            inner_val_pos = np.where(inner_val_mask)[0]
-            
-            fold_model = CatBoostRegressor(
-                iterations=self.iterations,
-                depth=self.depth,
-                learning_rate=self.learning_rate,
-                loss_function='MultiRMSE',
-                random_seed=self.random_seed,
-                verbose=0
-            )
-            
-            if len(inner_tr_pos) > 0 and len(inner_val_pos) > 0:
-                X_inner_tr, Y_inner_tr = X_train.iloc[inner_tr_pos], Y_train.iloc[inner_tr_pos]
-                X_inner_val, Y_inner_val = X_train.iloc[inner_val_pos], Y_train.iloc[inner_val_pos]
-                inner_model = CatBoostRegressor(
-                    iterations=self.iterations,
-                    depth=self.depth,
-                    learning_rate=self.learning_rate,
-                    loss_function='MultiRMSE',
-                    random_seed=self.random_seed,
-                    verbose=0
-                )
-                inner_model.fit(X_inner_tr, Y_inner_tr, eval_set=(X_inner_val, Y_inner_val), early_stopping_rounds=20)
-                best_iter = inner_model.get_best_iteration()
-                tree_count = int(getattr(inner_model, "tree_count_", best_iter + 1))
-                optimal_iters.append(tree_count)
-                
-                # Refit on full outer training fold (X_train, Y_train) with selected tree count
-                fold_model = CatBoostRegressor(
-                    iterations=tree_count,
-                    depth=self.depth,
-                    learning_rate=self.learning_rate,
-                    loss_function='MultiRMSE',
-                    random_seed=self.random_seed,
-                    verbose=0
-                )
-                fold_model.fit(X_train, Y_train)
-            else:
-                fold_model = CatBoostRegressor(
-                    iterations=self.iterations,
-                    depth=self.depth,
-                    learning_rate=self.learning_rate,
-                    loss_function='MultiRMSE',
-                    random_seed=self.random_seed,
-                    verbose=0
-                )
-                fold_model.fit(X_train, Y_train)
-                optimal_iters.append(self.iterations)
+            fold_model, tree_count = self._fit_inner_cv_fold(X_train, Y_train, df, train_idx)
+            optimal_iters.append(tree_count)
             
             # Predict strictly out-of-fold on the untouched test fold
             preds = fold_model.predict(X_test)
@@ -240,18 +206,11 @@ class RiskRegressor:
         # Fit final model on the entire dataset for serving/inference using median N*
         serving_iters = int(np.median(optimal_iters)) if optimal_iters else self.iterations
         logger.info(f"Fitting production serving model with median N*={serving_iters} iterations on full dataset...")
-        self.model = CatBoostRegressor(
-            iterations=serving_iters,
-            depth=self.depth,
-            learning_rate=self.learning_rate,
-            loss_function='MultiRMSE',
-            random_seed=self.random_seed,
-            verbose=0
-        )
+        self.model = self._build_estimator(serving_iters)
         self.model.fit(X, Y)
         self.is_fitted = True
         
-        # Pool predictions strictly across evaluated test observations (no unevaluated warm-up rows)
+        # Pool predictions strictly across evaluated test observations
         all_preds = np.vstack(test_preds_list)
         all_true = np.vstack(test_true_list)
         all_ewma = np.concatenate(test_ewma_list) if len(test_ewma_list) > 0 else None
