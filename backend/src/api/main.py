@@ -8,21 +8,20 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 from catboost import CatBoostRegressor
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import json
 import logging
-
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 
 # Load environment variables (.env)
 load_dotenv()
 
-# Add project root and backend to sys.path to resolve module imports
+# Add project root and backend to sys.path
 project_root = Path(__file__).resolve().parent.parent.parent.parent
 sys.path.append(str(project_root))
 sys.path.append(str(project_root / 'backend'))
@@ -108,6 +107,7 @@ class PortfolioRequest(BaseModel):
     reporting_date: Optional[str] = None
     holdings: List[Holding] = Field(..., min_length=1, max_length=50)
     benchmark: str = Field(default="^NSEI", max_length=20)
+
     @field_validator("reporting_date")
     @classmethod
     def validate_reporting_date(cls, v):
@@ -133,19 +133,17 @@ class PortfolioRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_portfolio(self):
-        # Reject duplicate tickers (canonicalized to uppercase)
         tickers = [h.ticker for h in self.holdings]
         if len(tickers) != len(set(tickers)):
             raise ValueError("Duplicate tickers detected in holdings.")
         total_weight = sum(h.weight for h in self.holdings)
         if not (0.90 <= total_weight <= 1.10):
             raise ValueError(f"Holdings weights must sum to ~1.0, got {total_weight:.4f}")
-        # Normalize weights strictly to 1.0
         for h in self.holdings:
             h.weight = float(h.weight / total_weight)
         return self
 
-# Preload candidate/production model and metadata at startup atomically
+# Preload candidate/production model and metadata at startup
 model_path = project_root / 'backend' / 'src' / 'models' / 'saved_model.cbm'
 if not model_path.exists():
     model_path = project_root / 'backend' / 'src' / 'models' / 'experiments' / 'family_b_ewma' / 'saved_model.cbm'
@@ -162,20 +160,19 @@ try:
     _candidate.load_model(str(model_path))
     sklearn_model = _candidate
     logger.info(f"Loaded CatBoost MultiRMSE model from {model_path}")
-    print(f"Loaded CatBoost MultiRMSE model from {model_path}")
 except Exception as e:
     sklearn_model = None
-    logger.error(f"Failed to load CatBoost model: {e}")
-    print(f"Failed to load CatBoost model from {model_path}: {e}")
+    logger.error(f"Failed to load CatBoost model from {model_path}: {e}")
 
 if metadata_path.exists():
     try:
         with open(metadata_path, 'r') as f:
             model_metadata = json.load(f)
-        print(f"Loaded model metadata from {metadata_path}")
+        logger.info(f"Loaded model metadata from {metadata_path}")
     except Exception as e:
-        print(f"Failed to load model metadata: {e}")
+        logger.error(f"Failed to load model metadata: {e}")
 
+# Retained for backward compatibility with test_api.py import contract
 FEATURE_NAME_MAP = {
     "Vol": "Annualized_Volatility",
     "VaR95": "Historical_VaR_95",
@@ -189,6 +186,46 @@ FEATURE_NAME_MAP = {
     "Sortino": "Sortino",
     "Beta": "Beta"
 }
+
+def _fetch_and_align_benchmark(
+    benchmark_ticker: str, 
+    start_date: pd.Timestamp, 
+    end_date: pd.Timestamp, 
+    inference_index: pd.Index
+) -> Tuple[Optional[pd.Series], List[float], List[float]]:
+    """
+    Fetches benchmark prices and derives:
+    1. market_returns: daily returns with NaNs preserved for RiskFeatureEngineer Beta calculation.
+    2. benchmark_cum: cumulative returns filled with 0.0 for UI charting.
+    3. benchmark_daily: daily return list filled with 0.0 for JSON delivery.
+    """
+    benchmark_cum = [0.0] * len(inference_index)
+    benchmark_daily = [0.0] * len(inference_index)
+    market_returns = None
+    try:
+        bm_raw = yf.download(
+            benchmark_ticker,
+            start=start_date,
+            end=end_date + pd.Timedelta(days=1),
+            progress=False
+        )
+        if not bm_raw.empty:
+            if isinstance(bm_raw.columns, pd.MultiIndex):
+                levels = bm_raw.columns.get_level_values(0).unique()
+                bm_prices = bm_raw.xs('Adj Close', axis=1, level=0) if 'Adj Close' in levels else bm_raw.xs('Close', axis=1, level=0)
+            else:
+                bm_prices = bm_raw[['Adj Close']] if 'Adj Close' in bm_raw.columns else bm_raw[['Close']]
+            
+            if isinstance(bm_prices, pd.DataFrame):
+                bm_prices = bm_prices.iloc[:, 0]
+            bm_daily = bm_prices.pct_change()
+            market_returns = bm_daily.reindex(inference_index).ffill(limit=5)
+            aligned_bm_returns = market_returns.fillna(0.0)
+            benchmark_cum = ((1 + aligned_bm_returns).cumprod() - 1).tolist()
+            benchmark_daily = aligned_bm_returns.tolist()
+    except Exception as e:
+        logger.warning(f"Error fetching benchmark {benchmark_ticker}: {e}")
+    return market_returns, benchmark_cum, benchmark_daily
 
 @app.get("/")
 async def root():
@@ -228,7 +265,7 @@ def predict_risk(request: PortfolioRequest):
             "holdings": [{"ticker": h.ticker, "weight": h.weight} for h in request.holdings]
         }
         
-        # 3. Ingestion pipeline (fetch data with sufficient lookback for lags)
+        # Ingestion pipeline: 2-year lookback with 5-year fallback for non-ValueError issues
         try:
             fetcher = ETFDataFetcher(years=2)
             output = fetcher.fetch_data(holdings_input)
@@ -242,7 +279,7 @@ def predict_risk(request: PortfolioRequest):
             price_data = output["price_data"]
             weights = output["weights"]
             
-        # 4. Reconstruct daily portfolio returns
+        # Reconstruct daily portfolio returns
         builder = PortfolioBuilder(price_data=price_data)
         portfolio_df = builder.build_portfolio(weights)
         daily_returns = portfolio_df['Daily_Return'].dropna()
@@ -254,13 +291,13 @@ def predict_risk(request: PortfolioRequest):
                 f"at least {min_required} days required for rolling risk metrics."
             )
             
-        # 5. Extract exact 16 features for V1.2 live inference (Family B + EWMA)
+        # Extract exact 16 features for V1.2 live inference (Family B + EWMA)
         inference_payload = DatasetBuilder.compute_inference_features(daily_returns, feature_set="family_b_ewma")
         features_df = inference_payload["features_df"]
         ewma_vol = inference_payload["ewma_vol"]
         feature_values = inference_payload["feature_values"]
         
-        # 6. Multi-Output Continuous Risk Forecast: [Forward_Vol, Forward_MaxDD]
+        # Multi-Output Continuous Risk Forecast: [Forward_Vol, Forward_MaxDD]
         raw_preds = sklearn_model.predict(features_df)
         if hasattr(raw_preds, 'ndim') and raw_preds.ndim == 2:
             pred_fwd_vol = float(raw_preds[0, 0])
@@ -269,10 +306,10 @@ def predict_risk(request: PortfolioRequest):
             pred_fwd_vol = float(raw_preds[0])
             pred_fwd_maxdd = float(raw_preds[1])
             
-        # 7. Spread vs Benchmark
+        # Spread vs Benchmark
         vol_spread_vs_ewma = pred_fwd_vol - ewma_vol
         
-        # 8. Risk Regime and Threat Classification
+        # Risk Regime and Threat Classification
         if pred_fwd_vol < 0.16:
             risk_class = "Low"
             vol_regime = "Subdued Volatility Corridor"
@@ -293,49 +330,20 @@ def predict_risk(request: PortfolioRequest):
         # Continuous composite synthetic vulnerability score (0.0 to 10.0 scale)
         risk_score = float(np.clip(round((pred_fwd_vol / 0.35) * 6.0 + (pred_fwd_maxdd / 0.12) * 4.0, 2), 0.5, 10.0))
         
-        # Option A: Empirical Out-Of-Fold (OOF) Risk Calibration (N = 4,917)
+        # Empirical Out-Of-Fold (OOF) Risk Calibration (N = 4,917)
         prob_dict = calibrate_risk_probabilities(pred_fwd_vol)
         
-        # 9. Slice recent 252-day window for supplementary metrics and charts
+        # Slice recent 252-day window for supplementary metrics and charts
         inference_returns = daily_returns.iloc[-252:]
         start_date = inference_returns.index[0]
         end_date = inference_returns.index[-1]
         component_returns = builder.daily_returns.loc[start_date:end_date]
         
-        # Benchmark comparison series
+        # Benchmark comparison series (strictly maintaining separate market and zero-filled series)
         benchmark_ticker = request.benchmark
-        benchmark_cum = [0.0] * len(inference_returns)
-        benchmark_daily = [0.0] * len(inference_returns)
-        market_returns = None
-        try:
-            bm_raw = yf.download(
-                benchmark_ticker,
-                start=start_date,
-                end=end_date + pd.Timedelta(days=1),
-                progress=False
-            )
-            if not bm_raw.empty:
-                if isinstance(bm_raw.columns, pd.MultiIndex):
-                    price_levels = bm_raw.columns.get_level_values(0).unique()
-                    if 'Adj Close' in price_levels:
-                        bm_prices = bm_raw.xs('Adj Close', axis=1, level=0)
-                    else:
-                        bm_prices = bm_raw.xs('Close', axis=1, level=0)
-                else:
-                    if 'Adj Close' in bm_raw.columns:
-                        bm_prices = bm_raw[['Adj Close']]
-                    else:
-                        bm_prices = bm_raw[['Close']]
-                
-                if isinstance(bm_prices, pd.DataFrame):
-                    bm_prices = bm_prices.iloc[:, 0]
-                bm_daily = bm_prices.pct_change()
-                market_returns = bm_daily.reindex(inference_returns.index).ffill(limit=5)
-                aligned_bm_returns = market_returns.fillna(0.0)
-                benchmark_cum = ((1 + aligned_bm_returns).cumprod() - 1).tolist()
-                benchmark_daily = aligned_bm_returns.tolist()
-        except Exception as e:
-            logger.warning(f"Error fetching benchmark {benchmark_ticker}: {e}")
+        market_returns, benchmark_cum, benchmark_daily = _fetch_and_align_benchmark(
+            benchmark_ticker, start_date, end_date, inference_returns.index
+        )
             
         # Traditional portfolio metrics for UI tooltips
         engineer = RiskFeatureEngineer(
@@ -401,5 +409,7 @@ def predict_risk(request: PortfolioRequest):
             "artifact_id": model_metadata.get("artifact_id", "v1.2-prod")
         })
         
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
