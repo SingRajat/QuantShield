@@ -7,6 +7,12 @@ from typing import Dict, Any, List
 
 logger = logging.getLogger(__name__)
 
+# Ticker aliases mapping restructured or renamed symbols to active Yahoo Finance tickers
+TICKER_ALIASES: Dict[str, str] = {
+    "TATAMOTORS.NS": "TMPV.NS",
+    "TATAMOTORS.BO": "TMPV.BO",
+}
+
 class ETFDataFetcher:
     """
     Fetches historical price data for the UNDERLYING stocks of an ETF portfolio.
@@ -82,6 +88,7 @@ class ETFDataFetcher:
         # Extract weights and list of tickers to fetch
         weights = {}
         tickers_to_fetch = []
+        fetch_to_orig = {}
         
         for item in holdings_list:
             if "ticker" not in item or "weight" not in item:
@@ -90,7 +97,10 @@ class ETFDataFetcher:
             weight = float(item["weight"])
             
             weights[ticker] = weight
-            tickers_to_fetch.append(ticker)
+            resolved_ticker = TICKER_ALIASES.get(ticker, ticker)
+            tickers_to_fetch.append(resolved_ticker)
+            if resolved_ticker != ticker:
+                fetch_to_orig[resolved_ticker] = ticker
             
         # Verify weights approximately sum to 1.0 (or 100 if percentages, assuming normalized to 1)
         total_weight = sum(weights.values())
@@ -133,9 +143,12 @@ class ETFDataFetcher:
             
             # Extract 'Adj Close' or 'Close' robustly via tie-breaking helper
             df = self._extract_prices(data, tickers_to_fetch)
+            if fetch_to_orig:
+                df.rename(columns=fetch_to_orig, inplace=True)
             
             # Handle missing or delisted tickers strictly (fail closed per QS-06)
-            missing_tickers = [t for t in tickers_to_fetch if t not in df.columns or df[t].isna().all()]
+            original_tickers = list(weights.keys())
+            missing_tickers = [t for t in original_tickers if t not in df.columns or df[t].isna().all()]
             if missing_tickers:
                 raise ValueError(
                     f"Failed to fetch market data for required tickers: {missing_tickers}. "
