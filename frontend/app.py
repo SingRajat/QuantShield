@@ -1,6 +1,7 @@
 import os
 import re
 import math
+import copy
 import json
 import html
 import hashlib
@@ -64,21 +65,34 @@ div[data-testid="stTabs"] {
 div[data-testid="stTabs"] button[role="tab"] {
     background-color: transparent !important;
     border: none !important;
-    border-bottom: 2px solid transparent !important;
+    border-bottom: none !important;
+    outline: none !important;
+    box-shadow: none !important;
     color: #8B949E !important;
     font-family: 'Inter', sans-serif !important;
     font-size: 14px !important;
     font-weight: 500 !important;
     padding: 8px 18px !important;
-    transition: all 0.15s ease !important;
+    transition: color 0.15s ease !important;
 }
 div[data-testid="stTabs"] button[role="tab"]:hover {
     color: #E6EDF3 !important;
 }
 div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
     color: #D4A853 !important;
-    border-bottom: 2px solid #D4A853 !important;
     font-weight: 600 !important;
+    border: none !important;
+    border-bottom: none !important;
+    box-shadow: none !important;
+}
+/* Native BaseWeb Gliding Highlight Bar */
+div[data-testid="stTabs"] div[data-baseweb="tab-highlight"] {
+    background-color: #D4A853 !important;
+    height: 2px !important;
+    border-radius: 1px !important;
+}
+div[data-testid="stTabs"] div[data-baseweb="tab-border"] {
+    background-color: #30363D !important;
 }
 div[data-testid="stTabs"] hr {
     border-color: #30363D !important;
@@ -430,6 +444,16 @@ if "holdings" not in st.session_state or not st.session_state["holdings"]:
     for idx, item in enumerate(st.session_state["holdings"]):
         st.session_state[f"slider_{idx}"] = float(item["weight"])
 
+# Helper function: Invalidate all downstream cached analysis
+def invalidate_analysis_cache():
+    st.session_state.pop("forecast_data", None)
+    st.session_state.pop("active_forecast_payload", None)
+    st.session_state.pop("forecast_error", None)
+    st.session_state.pop("mc_results", None)
+    st.session_state.pop("mc_mult_run", None)
+    st.session_state.pop("replay_results", None)
+    st.session_state.pop("replay_crisis_run", None)
+
 # --- DEFERRED ACTION DISPATCHER (Prevents StreamlitAPIException) ---
 # Any event (preset change, add/remove asset, auto-fit) that mutates slider
 # states queues a pending action and triggers a clean rerun. The mutation is then
@@ -443,7 +467,7 @@ if "pending_preset" in st.session_state:
             st.session_state[f"slider_{idx}"] = float(item["weight"])
         for extra_idx in range(len(st.session_state["holdings"]), 30):
             st.session_state.pop(f"slider_{extra_idx}", None)
-        st.session_state.pop("forecast_data", None)
+        invalidate_analysis_cache()
 
 if "pending_remove_idx" in st.session_state:
     rem_idx = st.session_state.pop("pending_remove_idx")
@@ -459,7 +483,7 @@ if "pending_remove_idx" in st.session_state:
         for i, h in enumerate(holdings):
             st.session_state[f"slider_{i}"] = float(h["weight"])
         st.session_state.pop(f"slider_{len(holdings)}", None)
-        st.session_state.pop("forecast_data", None)
+        invalidate_analysis_cache()
 
 if "pending_add_ticker" in st.session_state:
     new_sym = st.session_state.pop("pending_add_ticker")
@@ -474,7 +498,7 @@ if "pending_add_ticker" in st.session_state:
         holdings[-1]["weight"] = max(0.0, round(float(holdings[-1]["weight"]) + diff, 3))
         for i, h in enumerate(holdings):
             st.session_state[f"slider_{i}"] = float(h["weight"])
-        st.session_state.pop("forecast_data", None)
+        invalidate_analysis_cache()
 
 if "pending_autofit" in st.session_state:
     st.session_state.pop("pending_autofit")
@@ -487,7 +511,7 @@ if "pending_autofit" in st.session_state:
         holdings[-1]["weight"] = max(0.0, round(float(holdings[-1]["weight"]) + diff, 3))
         for i, h in enumerate(holdings):
             st.session_state[f"slider_{i}"] = float(h["weight"])
-    st.session_state.pop("forecast_data", None)
+    invalidate_analysis_cache()
 
 if "pending_equal" in st.session_state:
     st.session_state.pop("pending_equal")
@@ -501,7 +525,7 @@ if "pending_equal" in st.session_state:
         holdings[-1]["weight"] = max(0.0, round(float(holdings[-1]["weight"]) + diff, 3))
         for i, h in enumerate(holdings):
             st.session_state[f"slider_{i}"] = float(h["weight"])
-    st.session_state.pop("forecast_data", None)
+    invalidate_analysis_cache()
 
 if "pending_csv_holdings" in st.session_state:
     csv_holdings = st.session_state.pop("pending_csv_holdings")
@@ -516,8 +540,7 @@ if "pending_csv_holdings" in st.session_state:
         st.session_state[f"slider_{idx}"] = float(item["weight"])
     for extra_idx in range(len(csv_holdings), 50):
         st.session_state.pop(f"slider_{extra_idx}", None)
-    # R-04 Fix: Invalidate previous forecast data on CSV upload
-    st.session_state.pop("forecast_data", None)
+    invalidate_analysis_cache()
 
 # Helper function: Auto-balancing simplex redistribution
 def rebalance_from_slider(changed_idx):
@@ -530,6 +553,7 @@ def rebalance_from_slider(changed_idx):
     if n <= 1:
         holdings[0]["weight"] = 1.0
         st.session_state["slider_0"] = 1.0
+        invalidate_analysis_cache()
         return
 
     new_val = max(0.0, min(1.0, new_val))
@@ -557,6 +581,7 @@ def rebalance_from_slider(changed_idx):
     # Sync other slider states
     for i in range(n):
         st.session_state[f"slider_{i}"] = float(holdings[i]["weight"])
+    invalidate_analysis_cache()
 
 def apply_preset(preset_name):
     st.session_state["pending_preset"] = preset_name
@@ -656,16 +681,22 @@ benchmark = st.sidebar.selectbox(
 if benchmark == "Custom":
     benchmark = st.sidebar.text_input("Custom Ticker", value="^NSEI")
 
-# Sync benchmark & date states - auto-invalidate cached forecast on change
+# Sync benchmark, portfolio name & date states - auto-invalidate cached analysis on change
+if "active_portfolio_name" in st.session_state and st.session_state["active_portfolio_name"] != portfolio_name:
+    st.session_state["active_portfolio_name"] = portfolio_name
+    invalidate_analysis_cache()
+else:
+    st.session_state["active_portfolio_name"] = portfolio_name
+
 if "active_benchmark" in st.session_state and st.session_state["active_benchmark"] != benchmark:
     st.session_state["active_benchmark"] = benchmark
-    st.session_state.pop("forecast_data", None)
+    invalidate_analysis_cache()
 else:
     st.session_state["active_benchmark"] = benchmark
 
 if "active_reporting_date" in st.session_state and st.session_state["active_reporting_date"] != reporting_date:
     st.session_state["active_reporting_date"] = reporting_date
-    st.session_state.pop("forecast_data", None)
+    invalidate_analysis_cache()
 else:
     st.session_state["active_reporting_date"] = reporting_date
 
@@ -782,27 +813,21 @@ with st.sidebar.expander("Bulk CSV Upload", expanded=False):
                 st.error(f"CSV error: {exc}")
 
 st.sidebar.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-run_forecast = st.sidebar.button("GENERATE 21-DAY FORECAST", type="primary", use_container_width=True)
-
-# Sidebar model spec card
-st.sidebar.markdown(
-    """
-    <div class="sidebar-model-card">
-        <div class="card-header">
-            <span>MODEL SPECIFICATION</span>
-            <span class="badge-gold">V1.2</span>
-        </div>
-        <div class="card-row"><span>Forecaster:</span><span class="val">CatBoost Multi-Output</span></div>
-        <div class="card-row"><span>Forecast Window:</span><span class="val">21 Trading Days</span></div>
-        <div class="card-row"><span>Historical Data:</span><span class="val">5-Year NSE EOD</span></div>
-        <div class="card-row"><span>Standard Baseline:</span><span class="val">RiskMetrics EWMA</span></div>
-        <div class="card-row"><span>Confidence Interval:</span><span class="val">90% Normal Corridor</span></div>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+run_forecast = st.sidebar.button("Generate Forecast", type="primary", use_container_width=True)
 
 parsed_holdings = st.session_state.get("holdings", [])
+
+# Request payload snapshot
+current_payload = {
+    "etf_name": portfolio_name,
+    "reporting_date": reporting_date,
+    "holdings": parsed_holdings,
+    "benchmark": benchmark
+}
+
+# Invalidate cached analysis if current inputs diverge from analyzed payload
+if "active_forecast_payload" in st.session_state and st.session_state["active_forecast_payload"] != current_payload:
+    invalidate_analysis_cache()
 
 # Query backend helper
 def fetch_risk_forecast(payload):
@@ -815,39 +840,52 @@ def fetch_risk_forecast(payload):
     except Exception as exc:
         return None, f"Connection Failed: {str(exc)}"
 
-# Auto-run forecast on startup or button trigger
-should_fetch = run_forecast or ("forecast_data" not in st.session_state)
-
-if should_fetch:
+# Run forecast only on explicit sidebar button trigger
+if run_forecast:
+    invalidate_analysis_cache()
     if not parsed_holdings:
-        st.error("Please add at least one stock to the portfolio.")
+        st.sidebar.error("Please add at least one stock to the portfolio.")
     else:
-        payload = {
-            "etf_name": portfolio_name,
-            "reporting_date": reporting_date,
-            "holdings": parsed_holdings,
-            "benchmark": benchmark
-        }
         with st.spinner("Analyzing 5-year price series & computing 21-day forecast..."):
-            data, err = fetch_risk_forecast(payload)
+            data, err = fetch_risk_forecast(current_payload)
             if err:
-                st.error(f"Backend forecast error: {err}\n\nPlease ensure FastAPI is running on `{API_URL}`.")
+                st.session_state["forecast_error"] = f"Backend forecast error: {err}\n\nPlease ensure FastAPI is running on `{API_URL}`."
             else:
                 st.session_state["forecast_data"] = data
+                st.session_state["active_forecast_payload"] = copy.deepcopy(current_payload)
                 st.session_state["forecast_weights"] = {h["ticker"]: round(float(h["weight"]), 4) for h in parsed_holdings}
 
 # --- MAIN PAGE TABS ---
-tab_overview, tab_stress, tab_record = st.tabs([
-    " Risk Overview",
-    " Stress Testing",
-    " Track Record"
+tab_overview, tab_stress, tab_replay, tab_record = st.tabs([
+    "📊 Risk Overview",
+    "🎲 Scenario Stress Testing",
+    "⚡ Historical Shock Scenarios",
+    "🛡️ Model Track Record"
 ])
 
 # =============================================================================
 # TAB 1: RISK OVERVIEW
 # =============================================================================
 with tab_overview:
-    if "forecast_data" in st.session_state and st.session_state["forecast_data"]:
+    if "forecast_error" in st.session_state and st.session_state["forecast_error"]:
+        st.markdown(
+            f"""
+            <div class="terminal-card" style="border-top: 2px solid #F47067; padding: 18px; margin-bottom: 14px;">
+                <div class="terminal-header">
+                    <span class="terminal-title" style="color: #F47067;">FORECAST ERROR</span>
+                    <span class="badge-coral">EXECUTION FAILED</span>
+                </div>
+                <div style="font-size: 13px; color: #E6EDF3; margin-top: 8px; line-height: 1.5;">
+                    {html.escape(st.session_state['forecast_error'])}
+                </div>
+                <div style="font-size: 11px; color: #8B949E; margin-top: 10px;">
+                    Please verify that the backend API is running and reachable, or adjust your ticker selections in the sidebar, then click <strong>Generate Forecast</strong> again.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    elif "forecast_data" in st.session_state and st.session_state["forecast_data"]:
         data = st.session_state["forecast_data"]
 
         pred_data = data.get("predictions", {})
@@ -860,1103 +898,1216 @@ with tab_overview:
             raw_fwd_maxdd = data.get("forward_max_drawdown")
 
         if raw_fwd_vol is None or raw_fwd_maxdd is None:
-            st.error("Risk prediction data is incomplete or unavailable. Please click 'GENERATE 21-DAY FORECAST' in the sidebar to refresh.")
-            st.stop()
-        fwd_vol = float(raw_fwd_vol)
-        fwd_maxdd = float(raw_fwd_maxdd)
-
-        benchmark_data = data.get("benchmark", {})
-        raw_ewma = benchmark_data.get("ewma_volatility")
-        if raw_ewma is None:
-            raw_ewma = data.get("baseline_forecast", {}).get("forecast_volatility")
-        ewma_vol = float(raw_ewma) if raw_ewma is not None else 0.1604
-        vol_spread = float(benchmark_data.get("vol_spread_vs_ewma", fwd_vol - ewma_vol))
-        vol_spread_pct = vol_spread * 100
-        spread_sign = "+" if vol_spread_pct > 0 else ""
-
-        features_15 = data.get("features_16") or data.get("features_15") or data.get("feature_values", {})
-        risk_class = data.get("risk_class", "Medium")
-        risk_score = float(data.get("risk_score", 4.2))
-
-        probs = data.get("probabilities", {"Low": 0.25, "Medium": 0.55, "High": 0.20})
-        p_low = probs.get("Low", 0.25) * 100
-        p_med = probs.get("Medium", 0.55) * 100
-        p_high = probs.get("High", 0.20) * 100
-
-        portfolio_cum = data.get("portfolio_returns", [])
-        benchmark_cum = data.get("benchmark_returns", [])
-        returns_data = data.get("returns_data", {})
-        benchmark_name = data.get("benchmark_name", "NIFTY 50")
-        if benchmark_name == "^NSEI":
-            benchmark_name = "NIFTY 50"
-        elif benchmark_name == "^BSESN":
-            benchmark_name = "SENSEX"
-
-        # Risk-based color palette mappings
-        if risk_class == "Low":
-            score_color = "#3FB68B"
-            score_badge = "badge-green"
-            score_label = "Low Risk"
-        elif risk_class == "High":
-            score_color = "#F47067"
-            score_badge = "badge-coral"
-            score_label = "High Risk"
+            st.error("Risk prediction data is incomplete or unavailable. Please click 'Generate Forecast' in the sidebar to refresh.")
         else:
-            score_color = "#D29922"
-            score_badge = "badge-amber"
-            score_label = "Moderate Risk"
+            fwd_vol = float(raw_fwd_vol)
+            fwd_maxdd = float(raw_fwd_maxdd)
 
-        # ---------------------------------------------------------------------
-        # STEP 1: PORTFOLIO ALLOCATION STRIP
-        # ---------------------------------------------------------------------
-        # Asset legend pills directly below tabs
-        legend_items = []
-        for idx, item in enumerate(st.session_state["holdings"]):
-            c = ASSET_PALETTE[idx % len(ASSET_PALETTE)]
-            t = html.escape(str(item["ticker"]).replace(".NS", ""))
-            w = float(item["weight"]) * 100
-            legend_items.append(
-                f'<span style="display: inline-flex; align-items: center; gap: 5px; background: #161B22; border: 1px solid #30363D; border-radius: 4px; padding: 3px 8px; font-family: \'JetBrains Mono\', monospace; font-size: 11px; color: #E6EDF3;">'
-                f'<span style="color: {c}; font-size: 10px;">●</span>{t}: <strong style="color: #D4A853;">{w:.1f}%</strong></span>'
-            )
-        legend_html = " ".join(legend_items)
+            benchmark_data = data.get("benchmark", {})
+            raw_ewma = benchmark_data.get("ewma_volatility")
+            if raw_ewma is None:
+                raw_ewma = data.get("baseline_forecast", {}).get("forecast_volatility")
+            ewma_vol = float(raw_ewma) if raw_ewma is not None else 0.1604
+            vol_spread = float(benchmark_data.get("vol_spread_vs_ewma", fwd_vol - ewma_vol))
+            vol_spread_pct = vol_spread * 100
+            spread_sign = "+" if vol_spread_pct > 0 else ""
 
-        # Dynamic allocation balance check & modified weights notification
-        curr_w_map = {h["ticker"]: round(float(h["weight"]), 4) for h in st.session_state["holdings"]}
-        fc_w_map = st.session_state.get("forecast_weights", {})
-        total_w = sum(curr_w_map.values())
-        is_balanced = abs(total_w - 1.0) < 0.005
-        balance_badge = '<span class="badge-green">100% BALANCED</span>' if is_balanced else f'<span class="badge-coral">{total_w*100:.1f}% UNBALANCED</span>'
+            features_15 = data.get("features_16") or data.get("features_15") or data.get("feature_values", {})
+            risk_class = data.get("risk_class", "Medium")
+            risk_score = float(data.get("risk_score", 4.2))
 
-        weights_dirty = False
-        if fc_w_map:
-            for t, w in curr_w_map.items():
-                if abs(w - fc_w_map.get(t, -1.0)) > 0.005:
-                    weights_dirty = True
-                    break
+            probs = data.get("probabilities", {"Low": 0.25, "Medium": 0.55, "High": 0.20})
+            p_low = probs.get("Low", 0.25) * 100
+            p_med = probs.get("Medium", 0.55) * 100
+            p_high = probs.get("High", 0.20) * 100
 
-        st.markdown(
-            f"""
-            <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin: 6px 0 16px 0;">
-                <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
-                    <span style="font-size: 11px; font-weight: 600; color: #8B949E; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 4px;">Holdings:</span>
-                    {legend_html}
+            portfolio_cum = data.get("portfolio_returns", [])
+            benchmark_cum = data.get("benchmark_returns", [])
+            returns_data = data.get("returns_data", {})
+            benchmark_name = data.get("benchmark_name", "NIFTY 50")
+            if benchmark_name == "^NSEI":
+                benchmark_name = "NIFTY 50"
+            elif benchmark_name == "^BSESN":
+                benchmark_name = "SENSEX"
+
+            # Risk-based color palette mappings
+            if risk_class == "Low":
+                score_color = "#3FB68B"
+                score_badge = "badge-green"
+                score_label = "Low Risk"
+            elif risk_class == "High":
+                score_color = "#F47067"
+                score_badge = "badge-coral"
+                score_label = "High Risk"
+            else:
+                score_color = "#D29922"
+                score_badge = "badge-amber"
+                score_label = "Moderate Risk"
+
+            # ---------------------------------------------------------------------
+            # STEP 1: PORTFOLIO ALLOCATION STRIP
+            # ---------------------------------------------------------------------
+            # Asset legend pills directly below tabs
+            legend_items = []
+            for idx, item in enumerate(st.session_state["holdings"]):
+                c = ASSET_PALETTE[idx % len(ASSET_PALETTE)]
+                t = html.escape(str(item["ticker"]).replace(".NS", ""))
+                w = float(item["weight"]) * 100
+                legend_items.append(
+                    f'<span style="display: inline-flex; align-items: center; gap: 5px; background: #161B22; border: 1px solid #30363D; border-radius: 4px; padding: 3px 8px; font-family: \'JetBrains Mono\', monospace; font-size: 11px; color: #E6EDF3;">'
+                    f'<span style="color: {c}; font-size: 10px;">●</span>{t}: <strong style="color: #D4A853;">{w:.1f}%</strong></span>'
+                )
+            legend_html = " ".join(legend_items)
+
+            # Dynamic allocation balance check & modified weights notification
+            curr_w_map = {h["ticker"]: round(float(h["weight"]), 4) for h in st.session_state["holdings"]}
+            fc_w_map = st.session_state.get("forecast_weights", {})
+            total_w = sum(curr_w_map.values())
+            is_balanced = abs(total_w - 1.0) < 0.005
+            balance_badge = '<span class="badge-green">100% BALANCED</span>' if is_balanced else f'<span class="badge-coral">{total_w*100:.1f}% UNBALANCED</span>'
+
+            weights_dirty = False
+            if fc_w_map:
+                for t, w in curr_w_map.items():
+                    if abs(w - fc_w_map.get(t, -1.0)) > 0.005:
+                        weights_dirty = True
+                        break
+
+            st.markdown(
+                f"""
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px; margin: 6px 0 16px 0;">
+                    <div style="display: flex; gap: 8px; flex-wrap: wrap; align-items: center;">
+                        <span style="font-size: 11px; font-weight: 600; color: #8B949E; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 4px;">Holdings:</span>
+                        {legend_html}
+                    </div>
+                    <div>
+                        {balance_badge}
+                    </div>
                 </div>
-                <div>
-                    {balance_badge}
+                """,
+                unsafe_allow_html=True
+            )
+
+            if weights_dirty:
+                st.markdown(
+                    """
+                    <div style="background: rgba(210, 153, 34, 0.12); border: 1px solid rgba(210, 153, 34, 0.4); border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
+                        <div style="font-size: 12px; color: #E6EDF3;">
+                            <strong style="color: #D29922; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 8px;">Allocation Modified:</strong>
+                            Slider weights have changed. The risk forecast metrics below reflect your previous calculation.
+                        </div>
+                        <div style="font-size: 11px; color: #8B949E; font-family: 'JetBrains Mono', monospace;">
+                            Click <strong>GENERATE 21-DAY FORECAST</strong> in the sidebar to recompute
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            # ---------------------------------------------------------------------
+            # STEP 2: 3 HERO FORECAST CARDS
+            # ---------------------------------------------------------------------
+            col_vol, col_mdd, col_score = st.columns(3)
+
+            # Card 1: Expected Volatility
+            with col_vol:
+                calib_meta = data.get("risk_calibration", {})
+                res_quantiles = calib_meta.get("residual_quantiles", {})
+                # Realized y in [pred - q95(e), pred - q05(e)] where e = pred - true
+                q05_err = float(res_quantiles.get("vol_err_q05", -0.0384))
+                q95_err = float(res_quantiles.get("vol_err_q95", 0.0412))
+                ci_low = max(0.01, fwd_vol - q95_err) * 100
+                ci_high = max(ci_low + 0.1, fwd_vol - q05_err) * 100
+                spread_badge = "badge-coral" if vol_spread > 0.005 else ("badge-green" if vol_spread < -0.005 else "badge-gold")
+
+                st.markdown(
+                    f"""
+                    <div class="terminal-card" style="border-top: 2px solid #D4A853;">
+                        <div class="terminal-header">
+                            <span class="terminal-title">EXPECTED VOLATILITY</span>
+                            <span class="{score_badge}">{risk_class.upper()} VOL</span>
+                        </div>
+                        <div style="padding: 4px 0 10px 0;">
+                            <div style="display: flex; align-items: baseline; gap: 8px;">
+                                <span class="mono-val" style="font-size: 38px; font-weight: 700; color: #D4A853; line-height: 1;">
+                                    {fwd_vol * 100:.2f}%
+                                </span>
+                                <span style="font-size: 12px; color: #8B949E;">annualized</span>
+                            </div>
+                        </div>
+                        <div style="border-top: 1px solid #30363D; padding-top: 10px; font-size: 11px; line-height: 1.8;">
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #8B949E;">Standard Model (EWMA):</span>
+                                <span class="mono-val" style="color: #E6EDF3;">{ewma_vol * 100:.2f}%</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #8B949E;">Spread vs Standard:</span>
+                                <span class="{spread_badge}">{spread_sign}{vol_spread_pct:.2f}%</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #8B949E;" title="Quantiles fit on out-of-fold residuals; coverage evaluated on holdout data. Acceptable empirical coverage corridor: [85.0%, 95.0%] (nominal target 90.0%).">Empirical 90% Range (OOF-Calibrated, Holdout-Validated):</span>
+                                <span class="mono-val" style="color: #E6EDF3;">{ci_low:.1f}% — {ci_high:.1f}%</span>
+                            </div>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            # Card 2: Max Expected Dip
+            with col_mdd:
+                dd_badge = "badge-green" if fwd_maxdd < 0.05 else ("badge-amber" if fwd_maxdd < 0.10 else "badge-coral")
+                dd_label = "MILD DIP" if fwd_maxdd < 0.05 else ("MODERATE" if fwd_maxdd < 0.10 else "ELEVATED")
+                hist_worst = float(features_15.get('MaxDD_t63', features_15.get('MaxDD_t', fwd_maxdd))) * 100
+                dd_shift = float(features_15.get('Delta_MaxDD_5', 0.0)) * 100
+
+                st.markdown(
+                    f"""
+                    <div class="terminal-card" style="border-top: 2px solid #D29922;">
+                        <div class="terminal-header">
+                            <span class="terminal-title">MAX EXPECTED DIP</span>
+                            <span class="{dd_badge}">{dd_label}</span>
+                        </div>
+                        <div style="padding: 4px 0 10px 0;">
+                            <div style="display: flex; align-items: baseline; gap: 8px;">
+                                <span class="mono-val" style="font-size: 38px; font-weight: 700; color: #D29922; line-height: 1;">
+                                    {fwd_maxdd * 100:.2f}%
+                                </span>
+                                <span style="font-size: 12px; color: #8B949E;">max dip</span>
+                            </div>
+                        </div>
+                        <div style="border-top: 1px solid #30363D; padding-top: 10px; font-size: 11px; line-height: 1.8;">
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #8B949E;">Recent 60-Day Worst:</span>
+                                <span class="mono-val" style="color: #E6EDF3;">{hist_worst:.2f}%</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #8B949E;">5-Day Momentum Shift:</span>
+                                <span class="mono-val" style="color: {'#F47067' if dd_shift > 0 else '#3FB68B'};">{dd_shift:+.2f}%</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #8B949E;">Capital Impairment Risk:</span>
+                                <span style="color: #D29922; font-weight: 500;">Contained Corridor</span>
+                            </div>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            # Card 3: Overall Risk Rating
+            with col_score:
+                st.markdown(
+                    f"""
+                    <div class="terminal-card" style="border-top: 2px solid {score_color};">
+                        <div class="terminal-header">
+                            <span class="terminal-title">OVERALL RISK RATING</span>
+                            <span class="{score_badge}">{score_label}</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: flex-end; padding: 4px 0 10px 0;">
+                            <div>
+                                <div style="display: flex; align-items: baseline; gap: 6px;">
+                                    <span class="mono-val" style="font-size: 38px; font-weight: 700; color: {score_color}; line-height: 1;">
+                                        {risk_score:.1f}
+                                    </span>
+                                    <span style="font-size: 16px; color: #6E7681;">/ 10.0</span>
+                                </div>
+                            </div>
+                            <div style="text-align: right; font-size: 11px;">
+                                <span style="color: #8B949E;">Confidence Tier:</span>
+                                <div style="color: #3FB68B; font-weight: 600; font-family: 'JetBrains Mono', monospace;">High (4,900+ OOF days)</div>
+                            </div>
+                        </div>
+                        <div style="border-top: 1px solid #30363D; padding-top: 8px;">
+                            <div style="font-size: 10px; color: #8B949E; text-transform: uppercase; margin-bottom: 5px;">
+                                Risk Distribution Probability
+                            </div>
+                            <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px;">
+                                <div style="background-color: #10141A; border: 1px solid #30363D; padding: 5px 6px; border-radius: 4px;">
+                                    <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 10px; margin-bottom: 3px;">
+                                        <span style="color: #3FB68B;">Low</span>
+                                        <span style="color: #E6EDF3; font-weight: 600;">{p_low:.0f}%</span>
+                                    </div>
+                                    <div style="width: 100%; height: 4px; background-color: #21262D; border-radius: 2px;">
+                                        <div style="width: {p_low}%; height: 100%; background-color: #3FB68B; border-radius: 2px;"></div>
+                                    </div>
+                                </div>
+                                <div style="background-color: #10141A; border: 1px solid #30363D; padding: 5px 6px; border-radius: 4px;">
+                                    <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 10px; margin-bottom: 3px;">
+                                        <span style="color: #D29922;">Mid</span>
+                                        <span style="color: #E6EDF3; font-weight: 600;">{p_med:.0f}%</span>
+                                    </div>
+                                    <div style="width: 100%; height: 4px; background-color: #21262D; border-radius: 2px;">
+                                        <div style="width: {p_med}%; height: 100%; background-color: #D29922; border-radius: 2px;"></div>
+                                    </div>
+                                </div>
+                                <div style="background-color: #10141A; border: 1px solid #30363D; padding: 5px 6px; border-radius: 4px;">
+                                    <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 10px; margin-bottom: 3px;">
+                                        <span style="color: #F47067;">High</span>
+                                        <span style="color: #F47067; font-weight: 600;">{p_high:.0f}%</span>
+                                    </div>
+                                    <div style="width: 100%; height: 4px; background-color: #21262D; border-radius: 2px;">
+                                        <div style="width: {p_high}%; height: 100%; background-color: #F47067; border-radius: 2px;"></div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            # ---------------------------------------------------------------------
+            # STEP 3: TRAJECTORY CHART (60%) + EXECUTIVE SUMMARY (40%)
+            # ---------------------------------------------------------------------
+            col_chart, col_summary = st.columns([6, 4])
+
+            with col_chart:
+                st.markdown(
+                    """
+                    <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding-bottom: 6px; margin-bottom: 10px;">
+                        <span class="terminal-title">Portfolio Trajectory & 21-Day Forward Risk Corridor</span>
+                        <span class="badge-gold">90% CONFIDENCE RIBBON</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                # Build trajectory chart
+                P_hist = [r * 100 for r in portfolio_cum]
+                B_hist = [r * 100 for r in benchmark_cum] if benchmark_cum else [0.0] * len(portfolio_cum)
+                N = len(P_hist)
+
+                x_hist = list(range(-N + 1, 1))
+                x_fwd = list(range(0, 22))
+
+                p_last = P_hist[-1] if P_hist else 0.0
+
+                # 90% confidence ribbon radiating from today into the future
+                fwd_sigma = [(fwd_vol * np.sqrt(t / 252.0)) * 100 for t in x_fwd]
+                upper_band = [p_last + 1.645 * s for s in fwd_sigma]
+                lower_band = [p_last - 1.645 * s for s in fwd_sigma]
+
+                fig_perf = go.Figure()
+
+                # Confidence ribbon
+                fig_perf.add_trace(go.Scatter(
+                    x=x_fwd + x_fwd[::-1],
+                    y=upper_band + lower_band[::-1],
+                    fill='toself',
+                    fillcolor='rgba(212, 168, 83, 0.12)',
+                    line=dict(color='rgba(212, 168, 83, 0.35)', width=1, dash='dot'),
+                    hoverinfo="skip",
+                    name="90% Forward Corridor (21D)"
+                ))
+
+                # Benchmark historical line
+                fig_perf.add_trace(go.Scatter(
+                    x=x_hist,
+                    y=B_hist,
+                    mode='lines',
+                    name=f"{benchmark_name} (Past 1Y)",
+                    line=dict(color='#58A6FF', width=1.8),
+                    hovertemplate="%{x}d: %{y:.2f}%<extra>Benchmark</extra>"
+                ))
+
+                # Portfolio historical line
+                fig_perf.add_trace(go.Scatter(
+                    x=x_hist,
+                    y=P_hist,
+                    mode='lines',
+                    name="Portfolio (Past 1Y)",
+                    line=dict(color='#D4A853', width=2.2),
+                    hovertemplate="%{x}d: %{y:.2f}%<extra>Portfolio</extra>"
+                ))
+
+                # Forward baseline projection line
+                fig_perf.add_trace(go.Scatter(
+                    x=x_fwd,
+                    y=[p_last] * len(x_fwd),
+                    mode='lines',
+                    name="21D Center Path",
+                    line=dict(color='#D4A853', width=1.5, dash='dash'),
+                    hovertemplate="Day +%{x}: %{y:.2f}%<extra>Expected Center</extra>"
+                ))
+
+                # Vertical line at Today (x=0)
+                fig_perf.add_vline(
+                    x=0,
+                    line_dash="dot",
+                    line_color="#8B949E",
+                    annotation_text="Today",
+                    annotation_position="top left",
+                    annotation_font=dict(color="#8B949E", size=10, family="Inter")
+                )
+
+                fig_perf.update_layout(
+                    template="plotly_dark",
+                    paper_bgcolor="#161B22",
+                    plot_bgcolor="#161B22",
+                    margin=dict(l=40, r=20, t=30, b=30),
+                    height=340,
+                    font=dict(family="JetBrains Mono", color="#8B949E", size=10),
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom",
+                        y=1.03,
+                        xanchor="right",
+                        x=1,
+                        font=dict(size=10, color="#E6EDF3", family="Inter")
+                    ),
+                    xaxis=dict(
+                        showgrid=True,
+                        gridcolor="#21262D",
+                        zeroline=False,
+                        tickfont=dict(color="#8B949E", size=10),
+                        title=dict(text="Trading Days (relative to Today)", font=dict(size=10, color="#6E7681"))
+                    ),
+                    yaxis=dict(
+                        showgrid=True,
+                        gridcolor="#21262D",
+                        ticksuffix="%",
+                        zeroline=True,
+                        zerolinecolor="#30363D",
+                        tickfont=dict(color="#8B949E", size=10)
+                    )
+                )
+                st.plotly_chart(fig_perf, use_container_width=True)
+
+            with col_summary:
+                st.markdown(
+                    """
+                    <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding-bottom: 6px; margin-bottom: 10px;">
+                        <span class="terminal-title">Executive Risk Brief</span>
+                        <span class="badge-gold">21-DAY OUTLOOK</span>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+                # Deterministic, plain-English summary calculations
+                if risk_class == "Low":
+                    verdict_text = "Your portfolio sits in a calm, low-volatility zone. Expected price swings over the next 3 weeks are modest and within comfortable historical bands."
+                elif risk_class == "High":
+                    verdict_text = "Your portfolio has elevated volatility sensitivity. Sharp price swings are more likely over the next 3 weeks compared to steady market periods."
+                else:
+                    verdict_text = "Your portfolio risk is in a balanced, moderate range. Expected fluctuations over the next 3 weeks align with typical market movements."
+
+                # Calculate top risk contributor from weights & asset volatilities
+                top_stock = None
+                top_share = 0
+                if returns_data:
+                    asset_risks = {}
+                    for item in parsed_holdings:
+                        sym = item["ticker"]
+                        w = float(item["weight"])
+                        if sym in returns_data and len(returns_data[sym]) > 10:
+                            std_dev = np.std(returns_data[sym]) * np.sqrt(252)
+                            asset_risks[sym] = w * std_dev
+                        else:
+                            asset_risks[sym] = w * fwd_vol
+                    tot_r = sum(asset_risks.values())
+                    if tot_r > 0:
+                        top_sym = max(asset_risks, key=asset_risks.get)
+                        top_share = (asset_risks[top_sym] / tot_r) * 100
+                        top_stock = top_sym.replace(".NS", "")
+                if not top_stock and parsed_holdings:
+                    max_h = max(parsed_holdings, key=lambda x: x["weight"])
+                    top_stock = max_h["ticker"].replace(".NS", "")
+                    top_share = max_h["weight"] * 100
+
+                # Benchmark comparison text (QS-14 & R-03 & QS-R2: trailing 21-day volatility calculation & escaping)
+                real_bm_vol = None
+                bm_daily = data.get("benchmark_daily_returns", [])
+                if len(bm_daily) >= 21:
+                    bm_ret_series = pd.Series(bm_daily).dropna()
+                    real_bm_vol = float(bm_ret_series.iloc[-21:].std() * np.sqrt(252))
+                elif len(benchmark_cum) >= 22:
+                    # Recover daily returns from cumulative returns: (1 + C_t) / (1 + C_{t-1}) - 1
+                    bm_wealth = 1.0 + pd.Series(benchmark_cum)
+                    bm_ret_series = bm_wealth.pct_change().dropna()
+                    if len(bm_ret_series) >= 21:
+                        real_bm_vol = float(bm_ret_series.iloc[-21:].std() * np.sqrt(252))
+
+                escaped_bm_name = html.escape(benchmark_name)
+                if real_bm_vol is not None and not np.isnan(real_bm_vol) and real_bm_vol > 0:
+                    bm_spread_pct = (fwd_vol - real_bm_vol) * 100
+                    if abs(bm_spread_pct) < 0.25:
+                        bm_text = f"Your expected volatility closely tracks <strong>{escaped_bm_name}</strong> trailing 21-day volatility (difference is under 0.25%)."
+                    elif bm_spread_pct > 0:
+                        bm_text = f"Your portfolio is projected to be <strong>{bm_spread_pct:+.1f}% more volatile</strong> than {escaped_bm_name} trailing 21-day volatility."
+                    else:
+                        bm_text = f"Your portfolio is projected to be <strong>{abs(bm_spread_pct):.1f}% calmer</strong> than {escaped_bm_name} trailing 21-day volatility."
+                else:
+                    if abs(vol_spread_pct) < 0.25:
+                        bm_text = f"Your expected volatility closely tracks the portfolio's <strong>RiskMetrics EWMA baseline</strong> (spread under 0.25%)."
+                    elif vol_spread_pct > 0:
+                        bm_text = f"Your portfolio is projected to be <strong>{vol_spread_pct:+.1f}% more volatile</strong> than its EWMA baseline."
+                    else:
+                        bm_text = f"Your portfolio is projected to be <strong>{abs(vol_spread_pct):.1f}% calmer</strong> than its EWMA baseline."
+
+                # Actionable takeaway
+                if top_share > 35:
+                    action_text = f"Consider trimming <strong>{top_stock}</strong> or spreading its weight to reduce single-stock concentration."
+                elif risk_score > 6.0:
+                    action_text = "Consider adding defensive holdings (like FMCG or large-cap index funds) to buffer against market swings."
+                else:
+                    action_text = "Your current allocation maintains healthy diversification across its constituents."
+                brief_card_html = (
+                    '<div class="terminal-card" style="padding: 16px 18px; margin-bottom: 0;">'
+                    '<div style="font-size: 13px; line-height: 1.6; color: #E6EDF3;">'
+                    '<div style="margin-bottom: 12px;">'
+                    '<div style="font-size: 11px; font-weight: 600; color: #D4A853; text-transform: uppercase; margin-bottom: 3px;">1. Risk Verdict</div>'
+                    f'<div style="color: #E6EDF3; font-size: 13px;">{verdict_text}</div>'
+                    '</div>'
+                    '<div style="margin-bottom: 12px;">'
+                    '<div style="font-size: 11px; font-weight: 600; color: #D4A853; text-transform: uppercase; margin-bottom: 3px;">2. Primary Risk Driver</div>'
+                    f'<div style="color: #E6EDF3; font-size: 13px;"><strong>{top_stock}</strong> accounts for the largest share (~{top_share:.0f}%) of your portfolio\'s risk fluctuations due to its volatility and weighting.</div>'
+                    '</div>'
+                    '<div style="margin-bottom: 12px;">'
+                    '<div style="font-size: 11px; font-weight: 600; color: #D4A853; text-transform: uppercase; margin-bottom: 3px;">3. Benchmark Divergence</div>'
+                    f'<div style="color: #E6EDF3; font-size: 13px;">{bm_text}</div>'
+                    '</div>'
+                    '<div>'
+                    '<div style="font-size: 11px; font-weight: 600; color: #3FB68B; text-transform: uppercase; margin-bottom: 3px;">4. Practical Takeaway</div>'
+                    f'<div style="color: #E6EDF3; font-size: 13px;">{action_text}</div>'
+                    '</div>'
+                    '</div>'
+                    '<div style="font-size: 11px; color: #6E7681; margin-top: 14px; border-top: 1px solid #30363D; padding-top: 8px;">Methodology: 21-day CatBoost multi-output regression, Markowitz budget constraint, and RiskMetrics 90% confidence bands.</div>'
+                    '</div>'
+                )
+                st.markdown(brief_card_html, unsafe_allow_html=True)
+    else:
+        welcome_html = (
+            '<div class="terminal-card" style="padding: 24px; border-left: 3px solid #D4A853; margin-top: 8px;">'
+            '<div style="font-size: 18px; font-weight: 700; color: #E6EDF3; margin-bottom: 8px;">'
+            'Welcome to QuantShield'
+            '</div>'
+            '<div style="font-size: 14px; color: #8B949E; line-height: 1.6; margin-bottom: 16px;">'
+            'QuantShield helps you analyze and protect your Indian equity portfolio against market downturns. '
+            'It forecasts expected risk over the next 21 trading days, tests stress scenarios, and estimates how your stocks respond to major market crashes.'
+            '</div>'
+            '<div style="font-size: 13px; color: #D4A853; font-weight: 600;">'
+            '← Select or customize your portfolio in the sidebar, then click <strong>Generate Forecast</strong> to begin.'
+            '</div>'
+            '</div>'
+        )
+        st.markdown(welcome_html, unsafe_allow_html=True)
+
+# =============================================================================
+# TAB 2: SCENARIO STRESS TESTING
+# =============================================================================
+with tab_stress:
+    st.markdown(
+        """
+        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding: 4px 0 10px 0; margin-bottom: 14px;">
+            <div style="font-size: 13px; font-weight: 700; color: #D4A853; text-transform: uppercase; letter-spacing: 0.05em;">
+                Forward Scenario Stress Testing // 1,000 Monte Carlo Paths
+            </div>
+            <span class="badge-gold">1,000 FORWARD RUNS</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    if "stress_multiplier" not in st.session_state:
+        st.session_state["stress_multiplier"] = 1.0
+
+    col_st1, col_st2, col_st3 = st.columns(3)
+
+    with col_st1:
+        is_b1 = (st.session_state["stress_multiplier"] == 1.0)
+        if st.button("Normal Market (1.0x Vol)", key="btn_stress_10", use_container_width=True, type="primary" if is_b1 else "secondary"):
+            st.session_state["stress_multiplier"] = 1.0
+            st.session_state.pop("mc_results", None)
+            st.session_state.pop("mc_mult_run", None)
+            st.rerun()
+
+    with col_st2:
+        is_b2 = (st.session_state["stress_multiplier"] == 1.25)
+        if st.button("Elevated Volatility (+25% Shock)", key="btn_stress_125", use_container_width=True, type="primary" if is_b2 else "secondary"):
+            st.session_state["stress_multiplier"] = 1.25
+            st.session_state.pop("mc_results", None)
+            st.session_state.pop("mc_mult_run", None)
+            st.rerun()
+
+    with col_st3:
+        is_b3 = (st.session_state["stress_multiplier"] == 1.50)
+        if st.button("Severe Volatility (+50% Shock)", key="btn_stress_150", use_container_width=True, type="primary" if is_b3 else "secondary"):
+            st.session_state["stress_multiplier"] = 1.50
+            st.session_state.pop("mc_results", None)
+            st.session_state.pop("mc_mult_run", None)
+            st.rerun()
+
+    cur_mult = st.session_state["stress_multiplier"]
+
+    def run_monte_carlo_stress(fwd_vol, stress_mult=1.0, n_sims=1000, horizon_days=21, seed=42):
+        np.random.seed(seed)
+        dt = 1.0 / 252.0
+        sigma = fwd_vol * stress_mult
+        drift = -0.5 * (sigma ** 2) * dt
+        diffusion = sigma * np.sqrt(dt) * np.random.normal(0, 1, size=(n_sims, horizon_days))
+        daily_log_returns = drift + diffusion
+        
+        # QS-12: Geometric compounding for wealth paths (W_0 = 1.0)
+        wealth_trajectories = np.exp(np.cumsum(daily_log_returns, axis=1))
+        wealth_trajectories = np.hstack([np.ones((n_sims, 1)), wealth_trajectories])
+        cum_paths = (wealth_trajectories - 1.0) * 100.0
+
+        # Path Drawdown calculation per simulation run (W_t - Peak_t) / Peak_t
+        running_peaks = np.maximum.accumulate(wealth_trajectories, axis=1)
+        path_drawdowns = (wealth_trajectories - running_peaks) / running_peaks
+        max_dd_per_path = np.abs(np.min(path_drawdowns, axis=1)) * 100.0
+
+        terminal_returns = cum_paths[:, -1]
+        var_95 = float(np.percentile(terminal_returns, 5))
+        cvar_95 = float(terminal_returns[terminal_returns <= var_95].mean())
+        median_path = np.median(cum_paths, axis=0)
+        p5_path = np.percentile(cum_paths, 5, axis=0)
+        p95_path = np.percentile(cum_paths, 95, axis=0)
+        worst_terminal_loss = float(terminal_returns.min())
+        worst_path_dd = float(max_dd_per_path.max())
+        p95_path_dd = float(np.percentile(max_dd_per_path, 95))
+        prob_loss_5 = float((terminal_returns < -5.0).mean() * 100.0)
+
+        return {
+            "cum_paths": cum_paths,
+            "median_path": median_path,
+            "p5_path": p5_path,
+            "p95_path": p95_path,
+            "var_95": abs(var_95),
+            "cvar_95": abs(cvar_95),
+            "worst_terminal_loss": abs(worst_terminal_loss),
+            "worst_path_dd": abs(worst_path_dd),
+            "p95_path_dd": abs(p95_path_dd),
+            "prob_loss_5": prob_loss_5,
+            "sigma_annualized": sigma * 100.0
+        }
+
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+    if "forecast_data" not in st.session_state or not st.session_state["forecast_data"]:
+        st.button("Run Simulation", key="btn_run_sim_dis", disabled=True, use_container_width=True)
+        st.info("← Generate a Risk Overview forecast first to unlock scenario stress testing.")
+        st.markdown(
+            """
+            <div class="terminal-card" style="padding: 20px; border-left: 3px solid #D4A853; margin-top: 14px;">
+                <div style="font-size: 15px; font-weight: 700; color: #E6EDF3; margin-bottom: 6px;">
+                    Want to see how your portfolio will do in different scenarios?
+                </div>
+                <div style="font-size: 13px; color: #8B949E; line-height: 1.5; margin-bottom: 12px;">
+                    Simulates 1,000 forward market paths under normal, elevated (+25%), and severe volatility (+50%) conditions over the next 21 trading days to project potential drawdowns and downside risk.
+                </div>
+                <div style="font-size: 12px; color: #D4A853; font-weight: 600;">
+                    ← Click <strong>Generate Forecast</strong> in the sidebar first to load your portfolio risk baseline.
                 </div>
             </div>
             """,
             unsafe_allow_html=True
         )
-
-        if weights_dirty:
-            st.markdown(
-                """
-                <div style="background: rgba(210, 153, 34, 0.12); border: 1px solid rgba(210, 153, 34, 0.4); border-radius: 6px; padding: 10px 14px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px;">
-                    <div style="font-size: 12px; color: #E6EDF3;">
-                        <strong style="color: #D29922; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 8px;">Allocation Modified:</strong>
-                        Slider weights have changed. The risk forecast metrics below reflect your previous calculation.
-                    </div>
-                    <div style="font-size: 11px; color: #8B949E; font-family: 'JetBrains Mono', monospace;">
-                        Click <strong>GENERATE 21-DAY FORECAST</strong> in the sidebar to recompute
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-        # ---------------------------------------------------------------------
-        # STEP 2: 3 HERO FORECAST CARDS
-        # ---------------------------------------------------------------------
-        col_vol, col_mdd, col_score = st.columns(3)
-
-        # Card 1: Expected Volatility
-        with col_vol:
-            calib_meta = data.get("risk_calibration", {})
-            res_quantiles = calib_meta.get("residual_quantiles", {})
-            # Realized y in [pred - q95(e), pred - q05(e)] where e = pred - true
-            q05_err = float(res_quantiles.get("vol_err_q05", -0.0384))
-            q95_err = float(res_quantiles.get("vol_err_q95", 0.0412))
-            ci_low = max(0.01, fwd_vol - q95_err) * 100
-            ci_high = max(ci_low + 0.1, fwd_vol - q05_err) * 100
-            spread_badge = "badge-coral" if vol_spread > 0.005 else ("badge-green" if vol_spread < -0.005 else "badge-gold")
-
-            st.markdown(
-                f"""
-                <div class="terminal-card" style="border-top: 2px solid #D4A853;">
-                    <div class="terminal-header">
-                        <span class="terminal-title">EXPECTED VOLATILITY</span>
-                        <span class="{score_badge}">{risk_class.upper()} VOL</span>
-                    </div>
-                    <div style="padding: 4px 0 10px 0;">
-                        <div style="display: flex; align-items: baseline; gap: 8px;">
-                            <span class="mono-val" style="font-size: 38px; font-weight: 700; color: #D4A853; line-height: 1;">
-                                {fwd_vol * 100:.2f}%
-                            </span>
-                            <span style="font-size: 12px; color: #8B949E;">annualized</span>
-                        </div>
-                    </div>
-                    <div style="border-top: 1px solid #30363D; padding-top: 10px; font-size: 11px; line-height: 1.8;">
-                        <div style="display: flex; justify-content: space-between;">
-                            <span style="color: #8B949E;">Standard Model (EWMA):</span>
-                            <span class="mono-val" style="color: #E6EDF3;">{ewma_vol * 100:.2f}%</span>
-                        </div>
-                        <div style="display: flex; justify-content: space-between;">
-                            <span style="color: #8B949E;">Spread vs Standard:</span>
-                            <span class="{spread_badge}">{spread_sign}{vol_spread_pct:.2f}%</span>
-                        </div>
-                        <div style="display: flex; justify-content: space-between;">
-                            <span style="color: #8B949E;" title="Quantiles fit on out-of-fold residuals; coverage evaluated on holdout data. Acceptable empirical coverage corridor: [85.0%, 95.0%] (nominal target 90.0%).">Empirical 90% Range (OOF-Calibrated, Holdout-Validated):</span>
-                            <span class="mono-val" style="color: #E6EDF3;">{ci_low:.1f}% — {ci_high:.1f}%</span>
-                        </div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-        # Card 2: Max Expected Dip
-        with col_mdd:
-            dd_badge = "badge-green" if fwd_maxdd < 0.05 else ("badge-amber" if fwd_maxdd < 0.10 else "badge-coral")
-            dd_label = "MILD DIP" if fwd_maxdd < 0.05 else ("MODERATE" if fwd_maxdd < 0.10 else "ELEVATED")
-            hist_worst = float(features_15.get('MaxDD_t63', features_15.get('MaxDD_t', fwd_maxdd))) * 100
-            dd_shift = float(features_15.get('Delta_MaxDD_5', 0.0)) * 100
-
-            st.markdown(
-                f"""
-                <div class="terminal-card" style="border-top: 2px solid #D29922;">
-                    <div class="terminal-header">
-                        <span class="terminal-title">MAX EXPECTED DIP</span>
-                        <span class="{dd_badge}">{dd_label}</span>
-                    </div>
-                    <div style="padding: 4px 0 10px 0;">
-                        <div style="display: flex; align-items: baseline; gap: 8px;">
-                            <span class="mono-val" style="font-size: 38px; font-weight: 700; color: #D29922; line-height: 1;">
-                                {fwd_maxdd * 100:.2f}%
-                            </span>
-                            <span style="font-size: 12px; color: #8B949E;">max dip</span>
-                        </div>
-                    </div>
-                    <div style="border-top: 1px solid #30363D; padding-top: 10px; font-size: 11px; line-height: 1.8;">
-                        <div style="display: flex; justify-content: space-between;">
-                            <span style="color: #8B949E;">Recent 60-Day Worst:</span>
-                            <span class="mono-val" style="color: #E6EDF3;">{hist_worst:.2f}%</span>
-                        </div>
-                        <div style="display: flex; justify-content: space-between;">
-                            <span style="color: #8B949E;">5-Day Momentum Shift:</span>
-                            <span class="mono-val" style="color: {'#F47067' if dd_shift > 0 else '#3FB68B'};">{dd_shift:+.2f}%</span>
-                        </div>
-                        <div style="display: flex; justify-content: space-between;">
-                            <span style="color: #8B949E;">Capital Impairment Risk:</span>
-                            <span style="color: #D29922; font-weight: 500;">Contained Corridor</span>
-                        </div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-        # Card 3: Overall Risk Rating
-        with col_score:
-            st.markdown(
-                f"""
-                <div class="terminal-card" style="border-top: 2px solid {score_color};">
-                    <div class="terminal-header">
-                        <span class="terminal-title">OVERALL RISK RATING</span>
-                        <span class="{score_badge}">{score_label}</span>
-                    </div>
-                    <div style="display: flex; justify-content: space-between; align-items: flex-end; padding: 4px 0 10px 0;">
-                        <div>
-                            <div style="display: flex; align-items: baseline; gap: 6px;">
-                                <span class="mono-val" style="font-size: 38px; font-weight: 700; color: {score_color}; line-height: 1;">
-                                    {risk_score:.1f}
-                                </span>
-                                <span style="font-size: 16px; color: #6E7681;">/ 10.0</span>
-                            </div>
-                        </div>
-                        <div style="text-align: right; font-size: 11px;">
-                            <span style="color: #8B949E;">Confidence Tier:</span>
-                            <div style="color: #3FB68B; font-weight: 600; font-family: 'JetBrains Mono', monospace;">High (4,900+ OOF days)</div>
-                        </div>
-                    </div>
-                    <div style="border-top: 1px solid #30363D; padding-top: 8px;">
-                        <div style="font-size: 10px; color: #8B949E; text-transform: uppercase; margin-bottom: 5px;">
-                            Risk Distribution Probability
-                        </div>
-                        <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px;">
-                            <div style="background-color: #10141A; border: 1px solid #30363D; padding: 5px 6px; border-radius: 4px;">
-                                <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 10px; margin-bottom: 3px;">
-                                    <span style="color: #3FB68B;">Low</span>
-                                    <span style="color: #E6EDF3; font-weight: 600;">{p_low:.0f}%</span>
-                                </div>
-                                <div style="width: 100%; height: 4px; background-color: #21262D; border-radius: 2px;">
-                                    <div style="width: {p_low}%; height: 100%; background-color: #3FB68B; border-radius: 2px;"></div>
-                                </div>
-                            </div>
-                            <div style="background-color: #10141A; border: 1px solid #30363D; padding: 5px 6px; border-radius: 4px;">
-                                <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 10px; margin-bottom: 3px;">
-                                    <span style="color: #D29922;">Mid</span>
-                                    <span style="color: #E6EDF3; font-weight: 600;">{p_med:.0f}%</span>
-                                </div>
-                                <div style="width: 100%; height: 4px; background-color: #21262D; border-radius: 2px;">
-                                    <div style="width: {p_med}%; height: 100%; background-color: #D29922; border-radius: 2px;"></div>
-                                </div>
-                            </div>
-                            <div style="background-color: #10141A; border: 1px solid #30363D; padding: 5px 6px; border-radius: 4px;">
-                                <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 10px; margin-bottom: 3px;">
-                                    <span style="color: #F47067;">High</span>
-                                    <span style="color: #F47067; font-weight: 600;">{p_high:.0f}%</span>
-                                </div>
-                                <div style="width: 100%; height: 4px; background-color: #21262D; border-radius: 2px;">
-                                    <div style="width: {p_high}%; height: 100%; background-color: #F47067; border-radius: 2px;"></div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-        # ---------------------------------------------------------------------
-        # STEP 3: TRAJECTORY CHART (60%) + EXECUTIVE SUMMARY (40%)
-        # ---------------------------------------------------------------------
-        col_chart, col_summary = st.columns([6, 4])
-
-        with col_chart:
-            st.markdown(
-                """
-                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding-bottom: 6px; margin-bottom: 10px;">
-                    <span class="terminal-title">Portfolio Trajectory & 21-Day Forward Risk Corridor</span>
-                    <span class="badge-gold">90% CONFIDENCE RIBBON</span>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-            # Build trajectory chart
-            P_hist = [r * 100 for r in portfolio_cum]
-            B_hist = [r * 100 for r in benchmark_cum] if benchmark_cum else [0.0] * len(portfolio_cum)
-            N = len(P_hist)
-
-            x_hist = list(range(-N + 1, 1))
-            x_fwd = list(range(0, 22))
-
-            p_last = P_hist[-1] if P_hist else 0.0
-
-            # 90% confidence ribbon radiating from today into the future
-            fwd_sigma = [(fwd_vol * np.sqrt(t / 252.0)) * 100 for t in x_fwd]
-            upper_band = [p_last + 1.645 * s for s in fwd_sigma]
-            lower_band = [p_last - 1.645 * s for s in fwd_sigma]
-
-            fig_perf = go.Figure()
-
-            # Confidence ribbon
-            fig_perf.add_trace(go.Scatter(
-                x=x_fwd + x_fwd[::-1],
-                y=upper_band + lower_band[::-1],
-                fill='toself',
-                fillcolor='rgba(212, 168, 83, 0.12)',
-                line=dict(color='rgba(212, 168, 83, 0.35)', width=1, dash='dot'),
-                hoverinfo="skip",
-                name="90% Forward Corridor (21D)"
-            ))
-
-            # Benchmark historical line
-            fig_perf.add_trace(go.Scatter(
-                x=x_hist,
-                y=B_hist,
-                mode='lines',
-                name=f"{benchmark_name} (Past 1Y)",
-                line=dict(color='#58A6FF', width=1.8),
-                hovertemplate="%{x}d: %{y:.2f}%<extra>Benchmark</extra>"
-            ))
-
-            # Portfolio historical line
-            fig_perf.add_trace(go.Scatter(
-                x=x_hist,
-                y=P_hist,
-                mode='lines',
-                name="Portfolio (Past 1Y)",
-                line=dict(color='#D4A853', width=2.2),
-                hovertemplate="%{x}d: %{y:.2f}%<extra>Portfolio</extra>"
-            ))
-
-            # Forward baseline projection line
-            fig_perf.add_trace(go.Scatter(
-                x=x_fwd,
-                y=[p_last] * len(x_fwd),
-                mode='lines',
-                name="21D Center Path",
-                line=dict(color='#D4A853', width=1.5, dash='dash'),
-                hovertemplate="Day +%{x}: %{y:.2f}%<extra>Expected Center</extra>"
-            ))
-
-            # Vertical line at Today (x=0)
-            fig_perf.add_vline(
-                x=0,
-                line_dash="dot",
-                line_color="#8B949E",
-                annotation_text="Today",
-                annotation_position="top left",
-                annotation_font=dict(color="#8B949E", size=10, family="Inter")
-            )
-
-            fig_perf.update_layout(
-                template="plotly_dark",
-                paper_bgcolor="#161B22",
-                plot_bgcolor="#161B22",
-                margin=dict(l=40, r=20, t=30, b=30),
-                height=340,
-                font=dict(family="JetBrains Mono", color="#8B949E", size=10),
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.03,
-                    xanchor="right",
-                    x=1,
-                    font=dict(size=10, color="#E6EDF3", family="Inter")
-                ),
-                xaxis=dict(
-                    showgrid=True,
-                    gridcolor="#21262D",
-                    zeroline=False,
-                    tickfont=dict(color="#8B949E", size=10),
-                    title=dict(text="Trading Days (relative to Today)", font=dict(size=10, color="#6E7681"))
-                ),
-                yaxis=dict(
-                    showgrid=True,
-                    gridcolor="#21262D",
-                    ticksuffix="%",
-                    zeroline=True,
-                    zerolinecolor="#30363D",
-                    tickfont=dict(color="#8B949E", size=10)
-                )
-            )
-            st.plotly_chart(fig_perf, use_container_width=True)
-
-        with col_summary:
-            st.markdown(
-                """
-                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding-bottom: 6px; margin-bottom: 10px;">
-                    <span class="terminal-title">Executive Risk Brief</span>
-                    <span class="badge-gold">21-DAY OUTLOOK</span>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-            # Deterministic, plain-English summary calculations
-            if risk_class == "Low":
-                verdict_text = "Your portfolio sits in a calm, low-volatility zone. Expected price swings over the next 3 weeks are modest and within comfortable historical bands."
-            elif risk_class == "High":
-                verdict_text = "Your portfolio has elevated volatility sensitivity. Sharp price swings are more likely over the next 3 weeks compared to steady market periods."
-            else:
-                verdict_text = "Your portfolio risk is in a balanced, moderate range. Expected fluctuations over the next 3 weeks align with typical market movements."
-
-            # Calculate top risk contributor from weights & asset volatilities
-            top_stock = None
-            top_share = 0
-            if returns_data:
-                asset_risks = {}
-                for item in parsed_holdings:
-                    sym = item["ticker"]
-                    w = float(item["weight"])
-                    if sym in returns_data and len(returns_data[sym]) > 10:
-                        std_dev = np.std(returns_data[sym]) * np.sqrt(252)
-                        asset_risks[sym] = w * std_dev
-                    else:
-                        asset_risks[sym] = w * fwd_vol
-                tot_r = sum(asset_risks.values())
-                if tot_r > 0:
-                    top_sym = max(asset_risks, key=asset_risks.get)
-                    top_share = (asset_risks[top_sym] / tot_r) * 100
-                    top_stock = top_sym.replace(".NS", "")
-            if not top_stock and parsed_holdings:
-                max_h = max(parsed_holdings, key=lambda x: x["weight"])
-                top_stock = max_h["ticker"].replace(".NS", "")
-                top_share = max_h["weight"] * 100
-
-            # Benchmark comparison text (QS-14 & R-03 & QS-R2: trailing 21-day volatility calculation & escaping)
-            real_bm_vol = None
-            bm_daily = data.get("benchmark_daily_returns", [])
-            if len(bm_daily) >= 21:
-                bm_ret_series = pd.Series(bm_daily).dropna()
-                real_bm_vol = float(bm_ret_series.iloc[-21:].std() * np.sqrt(252))
-            elif len(benchmark_cum) >= 22:
-                # Recover daily returns from cumulative returns: (1 + C_t) / (1 + C_{t-1}) - 1
-                bm_wealth = 1.0 + pd.Series(benchmark_cum)
-                bm_ret_series = bm_wealth.pct_change().dropna()
-                if len(bm_ret_series) >= 21:
-                    real_bm_vol = float(bm_ret_series.iloc[-21:].std() * np.sqrt(252))
-
-            escaped_bm_name = html.escape(benchmark_name)
-            if real_bm_vol is not None and not np.isnan(real_bm_vol) and real_bm_vol > 0:
-                bm_spread_pct = (fwd_vol - real_bm_vol) * 100
-                if abs(bm_spread_pct) < 0.25:
-                    bm_text = f"Your expected volatility closely tracks <strong>{escaped_bm_name}</strong> trailing 21-day volatility (difference is under 0.25%)."
-                elif bm_spread_pct > 0:
-                    bm_text = f"Your portfolio is projected to be <strong>{bm_spread_pct:+.1f}% more volatile</strong> than {escaped_bm_name} trailing 21-day volatility."
-                else:
-                    bm_text = f"Your portfolio is projected to be <strong>{abs(bm_spread_pct):.1f}% calmer</strong> than {escaped_bm_name} trailing 21-day volatility."
-            else:
-                if abs(vol_spread_pct) < 0.25:
-                    bm_text = f"Your expected volatility closely tracks the portfolio's <strong>RiskMetrics EWMA baseline</strong> (spread under 0.25%)."
-                elif vol_spread_pct > 0:
-                    bm_text = f"Your portfolio is projected to be <strong>{vol_spread_pct:+.1f}% more volatile</strong> than its EWMA baseline."
-                else:
-                    bm_text = f"Your portfolio is projected to be <strong>{abs(vol_spread_pct):.1f}% calmer</strong> than its EWMA baseline."
-
-            # Actionable takeaway
-            if top_share > 35:
-                action_text = f"Consider trimming <strong>{top_stock}</strong> or spreading its weight to reduce single-stock concentration."
-            elif risk_score > 6.0:
-                action_text = "Consider adding defensive holdings (like FMCG or large-cap index funds) to buffer against market swings."
-            else:
-                action_text = "Your current allocation maintains healthy diversification across its constituents."
-            brief_card_html = (
-                '<div class="terminal-card" style="padding: 16px 18px; margin-bottom: 0;">'
-                '<div style="font-size: 13px; line-height: 1.6; color: #E6EDF3;">'
-                '<div style="margin-bottom: 12px;">'
-                '<div style="font-size: 11px; font-weight: 600; color: #D4A853; text-transform: uppercase; margin-bottom: 3px;">1. Risk Verdict</div>'
-                f'<div style="color: #E6EDF3; font-size: 13px;">{verdict_text}</div>'
-                '</div>'
-                '<div style="margin-bottom: 12px;">'
-                '<div style="font-size: 11px; font-weight: 600; color: #D4A853; text-transform: uppercase; margin-bottom: 3px;">2. Primary Risk Driver</div>'
-                f'<div style="color: #E6EDF3; font-size: 13px;"><strong>{top_stock}</strong> accounts for the largest share (~{top_share:.0f}%) of your portfolio\'s risk fluctuations due to its volatility and weighting.</div>'
-                '</div>'
-                '<div style="margin-bottom: 12px;">'
-                '<div style="font-size: 11px; font-weight: 600; color: #D4A853; text-transform: uppercase; margin-bottom: 3px;">3. Benchmark Divergence</div>'
-                f'<div style="color: #E6EDF3; font-size: 13px;">{bm_text}</div>'
-                '</div>'
-                '<div>'
-                '<div style="font-size: 11px; font-weight: 600; color: #3FB68B; text-transform: uppercase; margin-bottom: 3px;">4. Practical Takeaway</div>'
-                f'<div style="color: #E6EDF3; font-size: 13px;">{action_text}</div>'
-                '</div>'
-                '</div>'
-                '<div style="font-size: 11px; color: #6E7681; margin-top: 14px; border-top: 1px solid #30363D; padding-top: 8px;">Methodology: 21-day CatBoost multi-output regression, Markowitz budget constraint, and RiskMetrics 90% confidence bands.</div>'
-                '</div>'
-            )
-            st.markdown(brief_card_html, unsafe_allow_html=True)
-
-# =============================================================================
-# TAB 2: STRESS TESTING & HISTORICAL CRISES
-# =============================================================================
-with tab_stress:
-    if "forecast_data" not in st.session_state or not st.session_state["forecast_data"]:
-        st.info("Please generate a 21-day forecast first to unlock stress testing simulations.")
     else:
         data = st.session_state["forecast_data"]
         pred_data = data.get("predictions", {})
         raw_fwd_vol = pred_data.get("forward_volatility") or data.get("forward_volatility")
-        raw_fwd_maxdd = pred_data.get("forward_max_drawdown") or data.get("forward_max_drawdown")
-        if raw_fwd_vol is None or raw_fwd_maxdd is None:
-            st.error("Risk prediction data is incomplete or unavailable. Please click 'GENERATE 21-DAY FORECAST' in the sidebar to refresh.")
-            st.stop()
-        fwd_vol = float(raw_fwd_vol)
-        fwd_maxdd = float(raw_fwd_maxdd)
-        portfolio_cum = data.get("portfolio_returns", [])
+        if raw_fwd_vol is None:
+            st.error("Forward volatility is unavailable in the current forecast. Please re-run Generate Forecast in the sidebar.")
+        else:
+            fwd_vol = float(raw_fwd_vol)
+            run_sim = st.button("Run Simulation", key="btn_run_sim", type="primary", use_container_width=True)
+            if run_sim:
+                with st.spinner("Simulating 1,000 forward geometric Brownian paths..."):
+                    st.session_state["mc_results"] = run_monte_carlo_stress(fwd_vol, stress_mult=cur_mult)
+                    st.session_state["mc_mult_run"] = cur_mult
+
+            if "mc_results" in st.session_state and st.session_state.get("mc_mult_run") == cur_mult:
+                mc_res = st.session_state["mc_results"]
+                col_mc_chart, col_mc_stats = st.columns([6, 4])
+
+                with col_mc_chart:
+                    st.markdown(
+                        f"""
+                        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding-bottom: 6px; margin-bottom: 10px;">
+                            <span class="terminal-title">21-Day Forward Path Trajectories</span>
+                            <span class="badge-gold">PROJECTED VOL: {mc_res['sigma_annualized']:.1f}%/YR</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+                    fig_mc = go.Figure()
+                    days_axis = list(range(22))
+
+                    for path_idx in range(0, 50):
+                        fig_mc.add_trace(go.Scatter(
+                            x=days_axis,
+                            y=mc_res["cum_paths"][path_idx],
+                            mode='lines',
+                            line=dict(color='rgba(88, 166, 255, 0.08)', width=1),
+                            hoverinfo='skip',
+                            showlegend=False
+                        ))
+
+                    fig_mc.add_trace(go.Scatter(
+                        x=days_axis,
+                        y=mc_res["p95_path"],
+                        mode='lines',
+                        name="Top 5% Best Case (95th Pct)",
+                        line=dict(color='#3FB68B', width=1.8),
+                        hovertemplate="Day +%{x}: +%{y:.2f}% gain<extra>Top 5% Best Case</extra>"
+                    ))
+
+                    fig_mc.add_trace(go.Scatter(
+                        x=days_axis,
+                        y=mc_res["median_path"],
+                        mode='lines',
+                        name="Expected Path (Median)",
+                        line=dict(color='#D4A853', width=2.2),
+                        hovertemplate="Day +%{x}: %{y:.2f}%<extra>Expected Center Path</extra>"
+                    ))
+
+                    fig_mc.add_trace(go.Scatter(
+                        x=days_axis,
+                        y=mc_res["p5_path"],
+                        mode='lines',
+                        name="Safe Downside Limit (95% VaR)",
+                        line=dict(color='#F47067', width=2.2),
+                        hovertemplate="Day +%{x}: %{y:.2f}% loss<extra>Safe Downside Limit (95% VaR)</extra>"
+                    ))
+
+                    fig_mc.add_hline(y=0.0, line_dash="dash", line_color="#484F58", line_width=1)
+
+                    fig_mc.update_layout(
+                        template="plotly_dark",
+                        paper_bgcolor="#161B22",
+                        plot_bgcolor="#161B22",
+                        margin=dict(l=40, r=20, t=30, b=30),
+                        height=350,
+                        font=dict(family="JetBrains Mono", color="#8B949E", size=10),
+                        legend=dict(
+                            orientation="h",
+                            yanchor="bottom",
+                            y=1.03,
+                            xanchor="right",
+                            x=1,
+                            font=dict(size=10, color="#E6EDF3", family="Inter")
+                        ),
+                        xaxis=dict(
+                            showgrid=True,
+                            gridcolor="#21262D",
+                            zeroline=False,
+                            tickfont=dict(color="#8B949E", size=10),
+                            title=dict(text="Forward Trading Days (t to t+21d)", font=dict(size=10, color="#6E7681"))
+                        ),
+                        yaxis=dict(
+                            showgrid=True,
+                            gridcolor="#21262D",
+                            ticksuffix="%",
+                            zeroline=True,
+                            zerolinecolor="#30363D",
+                            tickfont=dict(color="#8B949E", size=10)
+                        )
+                    )
+                    st.plotly_chart(fig_mc, use_container_width=True)
+
+                with col_mc_stats:
+                    st.markdown(
+                        """
+                        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding-bottom: 6px; margin-bottom: 10px;">
+                            <span class="terminal-title">Projected Loss Scenarios (% of Capital)</span>
+                            <span class="badge-gold">N=1,000 RUNS</span>
+                        </div>
+                        """,
+                        unsafe_allow_html=True
+                    )
+
+                    stress_name = "Normal Market Conditions" if cur_mult == 1.0 else ("Elevated Volatility (+25%)" if cur_mult == 1.25 else "Severe Market Crisis (+50%)")
+                    var_1lakh = int(round(mc_res["var_95"] * 1000))
+                    cvar_1lakh = int(round(mc_res["cvar_95"] * 1000))
+
+                    tail_metrics_html = (
+                        '<div class="terminal-card" style="padding: 16px 18px; margin-bottom: 0;">'
+                        '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px;">'
+                        '<div style="background-color: #10141A; border: 1px solid #30363D; padding: 10px; border-radius: 6px;">'
+                        '<div style="font-size: 11px; font-weight: 600; color: #E6EDF3; text-transform: uppercase;">Safe Downside Limit</div>'
+                        '<div style="font-size: 10px; color: #58A6FF; margin-top: 1px;">21-Day VaR (95% Confidence)</div>'
+                        f'<div class="mono-val" style="font-size: 22px; font-weight: 700; color: #D29922; margin-top: 3px;">-{mc_res["var_95"]:.2f}%</div>'
+                        '<div style="font-size: 10px; color: #8B949E; margin-top: 3px;">95% chance losses won\'t exceed this % of capital</div>'
+                        '</div>'
+                        '<div style="background-color: #10141A; border: 1px solid #30363D; padding: 10px; border-radius: 6px;">'
+                        '<div style="font-size: 11px; font-weight: 600; color: #E6EDF3; text-transform: uppercase;">Severe Crash Average</div>'
+                        '<div style="font-size: 10px; color: #58A6FF; margin-top: 1px;">Expected Shortfall (CVaR)</div>'
+                        f'<div class="mono-val" style="font-size: 22px; font-weight: 700; color: #F47067; margin-top: 3px;">-{mc_res["cvar_95"]:.2f}%</div>'
+                        '<div style="font-size: 10px; color: #8B949E; margin-top: 3px;">Average loss if an extreme 1-in-20 crash strikes</div>'
+                        '</div>'
+                        '<div style="background-color: #10141A; border: 1px solid #30363D; padding: 10px; border-radius: 6px;">'
+                        '<div style="font-size: 11px; font-weight: 600; color: #E6EDF3; text-transform: uppercase;">Worst Simulated Drawdown</div>'
+                        '<div style="font-size: 10px; color: #58A6FF; margin-top: 1px;">Intra-Period Path MaxDD</div>'
+                        f'<div class="mono-val" style="font-size: 22px; font-weight: 700; color: #F47067; margin-top: 3px;">-{mc_res["worst_path_dd"]:.2f}%</div>'
+                        f'<div style="font-size: 10px; color: #8B949E; margin-top: 3px;">Deepest trough reached before day 21 (95th pct: -{mc_res["p95_path_dd"]:.1f}%)</div>'
+                        '</div>'
+                        '<div style="background-color: #10141A; border: 1px solid #30363D; padding: 10px; border-radius: 6px;">'
+                        '<div style="font-size: 11px; font-weight: 600; color: #E6EDF3; text-transform: uppercase;">Chance of Major Dip</div>'
+                        '<div style="font-size: 10px; color: #58A6FF; margin-top: 1px;">Probability of >5% Loss</div>'
+                        f'<div class="mono-val" style="font-size: 22px; font-weight: 700; color: #D4A853; margin-top: 3px;">{mc_res["prob_loss_5"]:.1f}%</div>'
+                        '<div style="font-size: 10px; color: #8B949E; margin-top: 3px;">Probability of losing more than 5% of your money</div>'
+                        '</div>'
+                        '</div>'
+                        '<div style="font-size: 13px; line-height: 1.6; color: #E6EDF3; border-top: 1px solid #30363D; padding-top: 10px;">'
+                        '<div style="font-size: 11px; font-weight: 600; color: #D4A853; text-transform: uppercase; margin-bottom: 4px;">EXECUTIVE STRESS BRIEF</div>'
+                        f'<div>Under <strong>{stress_name}</strong>, projected portfolio drawdown scenarios over 21 trading days:</div>'
+                        f'<div style="margin-top: 5px; font-size: 12px; color: #C9D1D9;">'
+                        f'• <strong>Safe Limit (VaR):</strong> 95% of simulated 21-day runs stay above <strong>-{mc_res["var_95"]:.1f}%</strong> (e.g. ₹{var_1lakh:,} max loss on ₹1,00,000).<br>'
+                        f'• <strong>Tail Crash (CVaR):</strong> In the worst 5% of market crashes, expected losses average <strong>-{mc_res["cvar_95"]:.1f}%</strong> (e.g. ₹{cvar_1lakh:,} loss on ₹1,00,000).<br>'
+                        f'• <strong>Path Drawdown Risk:</strong> 95% of simulated runs limit maximum intra-period dip to <strong>-{mc_res["p95_path_dd"]:.1f}%</strong> (worst single-path trough: -{mc_res["worst_path_dd"]:.1f}%).'
+                        f'</div>'
+                        '<div style="margin-top: 8px; font-size: 11px; color: #8B949E; border-top: 1px dashed #30363D; padding-top: 6px;">'
+                        '<strong>Investor Takeaway:</strong> Size position weights so you can comfortably endure the <em>Severe Crash Average (CVaR)</em> without panic-selling at the bottom.'
+                        '</div>'
+                        '</div>'
+                        '</div>'
+                    )
+                    st.markdown(tail_metrics_html, unsafe_allow_html=True)
+
+                st.markdown(
+                    """
+                    <div style="font-size: 11px; color: #6E7681; margin-top: 16px; border-top: 1px solid #30363D; padding-top: 10px;">
+                        <strong>Methodology & Governance:</strong> (1) Historical crisis impacts use Sharpe (1964) CAPM Beta sensitivity. (2) Monte Carlo uses 1,000 Geometric Brownian Motion paths with zero-drift risk neutrality (Black-Scholes-Merton 1973). (3) Tail metrics follow Basel III Expected Shortfall standards. Stocks unlisted during historical crises are explicitly flagged without fabricated price feeds.
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+            else:
+                st.markdown(
+                    """
+                    <div class="terminal-card" style="padding: 20px; border-left: 3px solid #D4A853; margin-top: 14px;">
+                        <div style="font-size: 15px; font-weight: 700; color: #E6EDF3; margin-bottom: 6px;">
+                            Want to see how your portfolio will do in different scenarios?
+                        </div>
+                        <div style="font-size: 13px; color: #8B949E; line-height: 1.5; margin-bottom: 12px;">
+                            Simulates 1,000 forward market paths under normal, elevated (+25%), and severe volatility (+50%) conditions over the next 21 trading days to project potential drawdowns and downside risk.
+                        </div>
+                        <div style="font-size: 12px; color: #D4A853; font-weight: 600;">
+                            Select a volatility condition above and click <strong>Run Simulation</strong> to project forward market paths.
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+# =============================================================================
+# TAB 3: ESTIMATED HISTORICAL SHOCK SCENARIOS
+# =============================================================================
+with tab_replay:
+    st.markdown(
+        """
+        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding: 4px 0 10px 0; margin-bottom: 14px;">
+            <div style="font-size: 13px; font-weight: 700; color: #D4A853; text-transform: uppercase; letter-spacing: 0.05em;">
+                Estimated Historical Shock Scenarios // CAPM Beta Sensitivity
+            </div>
+            <span class="badge-gold">HISTORICAL SCENARIOS</span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    INDIAN_CRISES = {
+        "covid_2020": {
+            "name": "2020 COVID Flash Crash",
+            "dates": "Jan 14, 2020 – Mar 23, 2020",
+            "nifty_drop": -38.4,
+            "recovery_days": 145,
+            "catalyst": "Worldwide pandemic outbreak and sudden nationwide lockdown. India VIX spiked to 86.6.",
+            "regime": "Acute Liquidity Shock / V-Shaped Recovery",
+            "crisis_year": 2020
+        },
+        "gfc_2008": {
+            "name": "2008 Global Financial Crisis",
+            "dates": "Jan 8, 2008 – Oct 27, 2008",
+            "nifty_drop": -59.9,
+            "recovery_days": 670,
+            "catalyst": "US subprime collapse, Lehman Brothers liquidation, and relentless global liquidity contraction.",
+            "regime": "Systemic Credit Freeze / Multi-Year Bear Market",
+            "crisis_year": 2008
+        },
+        "taper_2013": {
+            "name": "2013 Taper Tantrum",
+            "dates": "May 20, 2013 – Aug 28, 2013",
+            "nifty_drop": -17.2,
+            "recovery_days": 105,
+            "catalyst": "US Fed signaled QE taper, causing sudden emerging market capital flight and a 25% Rupee depreciation.",
+            "regime": "Currency Devaluation & Rate Spike",
+            "crisis_year": 2013
+        },
+        "rate_2022": {
+            "name": "2022 Global Rate Shock",
+            "dates": "Oct 18, 2021 – Jun 17, 2022",
+            "nifty_drop": -17.2,
+            "recovery_days": 110,
+            "catalyst": "Multi-decade inflation spike, Russia-Ukraine war, crude above $120, and aggressive Fed/RBI rate hikes.",
+            "regime": "Synchronized Rate Tightening Cycle",
+            "crisis_year": 2021
+        }
+    }
+
+    STOCK_LISTING_YEARS = {
+        "HDFCBANK.NS": 1995,
+        "ICICIBANK.NS": 1997,
+        "SBIN.NS": 1994,
+        "AXISBANK.NS": 1998,
+        "KOTAKBANK.NS": 1996,
+        "TCS.NS": 2004,
+        "INFY.NS": 1993,
+        "WIPRO.NS": 1995,
+        "HCLTECH.NS": 1999,
+        "TECHM.NS": 2006,
+        "RELIANCE.NS": 1990,
+        "HINDUNILVR.NS": 1990,
+        "ITC.NS": 1990,
+        "NESTLEIND.NS": 1990,
+        "TATAMOTORS.NS": 1990,
+        "TMPV.NS": 1990,
+        "MARUTI.NS": 2003,
+        "M&M.NS": 1990,
+        "BAJFINANCE.NS": 1998,
+        "BHARTIARTL.NS": 2002,
+        "LT.NS": 1990,
+        "ASIANPAINT.NS": 1990,
+        "TITAN.NS": 1990,
+        "SUNPHARMA.NS": 1994,
+        "COALINDIA.NS": 2010,
+        "ZOMATO.NS": 2021,
+        "PAYTM.NS": 2021,
+        "NYKAA.NS": 2021,
+        "POLICYBZR.NS": 2021,
+        "CRISIL.NS": 1993,
+        "INDHOTEL.NS": 1990,
+        "POWERGRID.NS": 2007,
+        "LICI.NS": 2022,
+        "JIOFIN.NS": 2023
+    }
+
+    if "selected_crisis" not in st.session_state:
+        st.session_state["selected_crisis"] = "covid_2020"
+
+    crisis_keys = list(INDIAN_CRISES.keys())
+    col_c1, col_c2, col_c3, col_c4 = st.columns(4)
+    cols_crisis = [col_c1, col_c2, col_c3, col_c4]
+
+    for i, c_key in enumerate(crisis_keys):
+        c_info = INDIAN_CRISES[c_key]
+        is_active = (st.session_state["selected_crisis"] == c_key)
+        with cols_crisis[i]:
+            btn_type = "primary" if is_active else "secondary"
+            btn_label = f"{c_info['name'].split(' ', 1)[0]} Crash"
+            if st.button(btn_label, key=f"crisis_btn_{c_key}", use_container_width=True, type=btn_type):
+                st.session_state["selected_crisis"] = c_key
+                st.session_state.pop("replay_results", None)
+                st.session_state.pop("replay_crisis_run", None)
+                st.rerun()
+
+    cur_crisis_key = st.session_state["selected_crisis"]
+    cur_crisis = INDIAN_CRISES[cur_crisis_key]
+
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+
+    if "forecast_data" not in st.session_state or not st.session_state["forecast_data"]:
+        st.button("Run Crisis Shock Analysis", key="btn_run_crisis_dis", disabled=True, use_container_width=True)
+        st.info("← Generate a Risk Overview forecast first to unlock historical shock scenarios.")
+        st.markdown(
+            """
+            <div class="terminal-card" style="padding: 20px; border-left: 3px solid #D4A853; margin-top: 14px;">
+                <div style="font-size: 15px; font-weight: 700; color: #E6EDF3; margin-bottom: 6px;">
+                    Want to see how your portfolio responds to major market crashes?
+                </div>
+                <div style="font-size: 13px; color: #8B949E; line-height: 1.5; margin-bottom: 12px;">
+                    Estimates your portfolio's capital drop during India's greatest market downturns (2020 COVID Flash Crash, 2008 Global Financial Crisis, 2013 Taper Tantrum, and 2022 Rate Shock) using empirical asset sensitivity.
+                </div>
+                <div style="font-size: 12px; color: #D4A853; font-weight: 600;">
+                    ← Click <strong>Generate Forecast</strong> in the sidebar first to load your portfolio risk baseline.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+    else:
+        data = st.session_state["forecast_data"]
         benchmark_cum = data.get("benchmark_returns", [])
         returns_data = data.get("returns_data", {})
-        benchmark_name = data.get("benchmark_name", "NIFTY 50")
-        if benchmark_name == "^NSEI":
-            benchmark_name = "NIFTY 50"
-        elif benchmark_name == "^BSESN":
-            benchmark_name = "SENSEX"
 
-        # 1. Historical Indian Market Crises Definition
-        INDIAN_CRISES = {
-            "covid_2020": {
-                "name": "2020 COVID Flash Crash",
-                "dates": "Jan 14, 2020 – Mar 23, 2020",
-                "nifty_drop": -38.4,
-                "recovery_days": 145,
-                "catalyst": "Worldwide pandemic outbreak and sudden nationwide lockdown. India VIX spiked to 86.6.",
-                "regime": "Acute Liquidity Shock / V-Shaped Recovery",
-                "crisis_year": 2020
-            },
-            "gfc_2008": {
-                "name": "2008 Global Financial Crisis",
-                "dates": "Jan 8, 2008 – Oct 27, 2008",
-                "nifty_drop": -59.9,
-                "recovery_days": 670,
-                "catalyst": "US subprime collapse, Lehman Brothers liquidation, and relentless global liquidity contraction.",
-                "regime": "Systemic Credit Freeze / Multi-Year Bear Market",
-                "crisis_year": 2008
-            },
-            "taper_2013": {
-                "name": "2013 Taper Tantrum",
-                "dates": "May 20, 2013 – Aug 28, 2013",
-                "nifty_drop": -17.2,
-                "recovery_days": 105,
-                "catalyst": "US Fed signaled QE taper, causing sudden emerging market capital flight and a 25% Rupee depreciation.",
-                "regime": "Currency Devaluation & Rate Spike",
-                "crisis_year": 2013
-            },
-            "rate_2022": {
-                "name": "2022 Global Rate Shock",
-                "dates": "Oct 18, 2021 – Jun 17, 2022",
-                "nifty_drop": -17.2,
-                "recovery_days": 110,
-                "catalyst": "Multi-decade inflation spike, Russia-Ukraine war, crude above $120, and aggressive Fed/RBI rate hikes.",
-                "regime": "Synchronized Rate Tightening Cycle",
-                "crisis_year": 2021
-            }
-        }
+        run_crisis = st.button("Run Crisis Shock Analysis", key="btn_run_crisis", type="primary", use_container_width=True)
+        if run_crisis:
+            with st.spinner("Calculating asset beta sensitivities against historical index shocks..."):
+                # Compute individual asset Betas and portfolio Beta from real data
+                bm_daily = None
+                if len(benchmark_cum) > 1:
+                    bm_cum_arr = np.array(benchmark_cum)
+                    denom = 1.0 + bm_cum_arr[:-1]
+                    denom = np.where(np.abs(denom) < 1e-6, 1.0, denom)
+                    bm_daily = np.diff(bm_cum_arr) / denom
 
-        # Listing years for Indian stocks for factual non-fabrication check
-        STOCK_LISTING_YEARS = {
-            "HDFCBANK.NS": 1995,
-            "ICICIBANK.NS": 1997,
-            "SBIN.NS": 1994,
-            "AXISBANK.NS": 1998,
-            "KOTAKBANK.NS": 1996,
-            "TCS.NS": 2004,
-            "INFY.NS": 1993,
-            "WIPRO.NS": 1995,
-            "HCLTECH.NS": 1999,
-            "TECHM.NS": 2006,
-            "RELIANCE.NS": 1990,
-            "HINDUNILVR.NS": 1990,
-            "ITC.NS": 1990,
-            "NESTLEIND.NS": 1990,
-            "TATAMOTORS.NS": 1990,
-            "MARUTI.NS": 2003,
-            "M&M.NS": 1990,
-            "BAJFINANCE.NS": 1998,
-            "BHARTIARTL.NS": 2002,
-            "LT.NS": 1990,
-            "ASIANPAINT.NS": 1990,
-            "TITAN.NS": 1990,
-            "SUNPHARMA.NS": 1994,
-            "COALINDIA.NS": 2010,
-            "ZOMATO.NS": 2021,
-            "PAYTM.NS": 2021,
-            "NYKAA.NS": 2021,
-            "POLICYBZR.NS": 2021,
-            "CRISIL.NS": 1993,
-            "INDHOTEL.NS": 1990,
-            "POWERGRID.NS": 2007,
-            "LICI.NS": 2022,
-            "JIOFIN.NS": 2023
-        }
+                asset_betas = {}
+                for item in parsed_holdings:
+                    sym = item["ticker"]
+                    if returns_data and sym in returns_data and bm_daily is not None and len(returns_data[sym]) > 1:
+                        r_a = np.array(returns_data[sym])
+                        min_len = min(len(r_a), len(bm_daily))
+                        cov = np.cov(r_a[-min_len:], bm_daily[-min_len:])[0, 1]
+                        var_m = np.var(bm_daily[-min_len:])
+                        b_val = (cov / var_m) if var_m > 1e-7 else 1.0
+                        asset_betas[sym] = max(0.2, min(2.8, float(b_val)))
+                    else:
+                        asset_betas[sym] = float(data.get("metrics", {}).get("Beta", 1.0))
 
-        if "selected_crisis" not in st.session_state:
-            st.session_state["selected_crisis"] = "covid_2020"
+                port_beta = sum(float(item["weight"]) * asset_betas.get(item["ticker"], 1.0) for item in parsed_holdings)
+                port_beta = max(0.2, min(2.8, float(port_beta)))
 
-        if "stress_multiplier" not in st.session_state:
-            st.session_state["stress_multiplier"] = 1.0
+                nifty_shock = cur_crisis["nifty_drop"]
+                est_port_drop = port_beta * nifty_shock
+                cushion = abs(nifty_shock) - abs(est_port_drop)
 
-        # Compute individual asset Betas and portfolio Beta from real data
-        bm_daily = None
-        if len(benchmark_cum) > 1:
-            bm_cum_arr = np.array(benchmark_cum)
-            denom = 1.0 + bm_cum_arr[:-1]
-            denom = np.where(np.abs(denom) < 1e-6, 1.0, denom)
-            bm_daily = np.diff(bm_cum_arr) / denom
+                st.session_state["replay_results"] = {
+                    "asset_betas": asset_betas,
+                    "port_beta": port_beta,
+                    "est_port_drop": est_port_drop,
+                    "cushion": cushion
+                }
+                st.session_state["replay_crisis_run"] = cur_crisis_key
 
-        asset_betas = {}
-        for item in parsed_holdings:
-            sym = item["ticker"]
-            if returns_data and sym in returns_data and bm_daily is not None and len(returns_data[sym]) > 1:
-                r_a = np.array(returns_data[sym])
-                min_len = min(len(r_a), len(bm_daily))
-                cov = np.cov(r_a[-min_len:], bm_daily[-min_len:])[0, 1]
-                var_m = np.var(bm_daily[-min_len:])
-                b_val = (cov / var_m) if var_m > 1e-7 else 1.0
-                asset_betas[sym] = max(0.2, min(2.8, float(b_val)))
-            else:
-                asset_betas[sym] = float(data.get("metrics", {}).get("Beta", 1.0))
-
-        port_beta = sum(float(item["weight"]) * asset_betas.get(item["ticker"], 1.0) for item in parsed_holdings)
-        port_beta = max(0.2, min(2.8, float(port_beta)))
-
-        # ---------------------------------------------------------------------
-        # SECTION 1: REAL INDIAN MARKET CRISES (HISTORICAL REPLAY)
-        # ---------------------------------------------------------------------
-        st.markdown(
-            """
-            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding: 4px 0 10px 0; margin-bottom: 14px;">
-                <div style="font-size: 13px; font-weight: 700; color: #D4A853; text-transform: uppercase; letter-spacing: 0.05em;">
-                    Section 1 // Real Indian Market Crises (Historical Replay)
-                </div>
-                <span class="badge-gold">HISTORICAL SCENARIOS</span>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-        crisis_keys = list(INDIAN_CRISES.keys())
-        col_c1, col_c2, col_c3, col_c4 = st.columns(4)
-        cols_crisis = [col_c1, col_c2, col_c3, col_c4]
-
-        for i, c_key in enumerate(crisis_keys):
-            c_info = INDIAN_CRISES[c_key]
-            is_active = (st.session_state["selected_crisis"] == c_key)
-            with cols_crisis[i]:
-                btn_type = "primary" if is_active else "secondary"
-                btn_label = f"{c_info['name'].split(' ', 1)[0]} Crash"
-                if st.button(btn_label, key=f"crisis_btn_{c_key}", use_container_width=True, type=btn_type):
-                    st.session_state["selected_crisis"] = c_key
-                    st.rerun()
-
-        # Active Crisis Data
-        cur_crisis = INDIAN_CRISES[st.session_state["selected_crisis"]]
-        nifty_shock = cur_crisis["nifty_drop"]
-        est_port_drop = port_beta * nifty_shock
-        cushion = abs(nifty_shock) - abs(est_port_drop)
-
-        crisis_banner_html = (
-            '<div class="terminal-card" style="padding: 14px 18px; margin-bottom: 14px; background: #161B22; border-left: 3px solid #D4A853;">'
-            '<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">'
-            '<div>'
-            f'<div style="font-size: 14px; font-weight: 700; color: #E6EDF3;">{cur_crisis["name"]}</div>'
-            f'<div style="font-size: 12px; color: #8B949E; margin-top: 2px;">{cur_crisis["dates"]} · <span style="color: #D4A853;">{cur_crisis["regime"]}</span></div>'
-            '</div>'
-            '<div style="text-align: right;">'
-            '<span style="font-size: 11px; color: #8B949E;">NIFTY 50 HISTORICAL DROP:</span> '
-            f'<span class="mono-val" style="font-size: 16px; font-weight: 700; color: #58A6FF;">{nifty_shock:.1f}%</span>'
-            '</div>'
-            '</div>'
-            f'<div style="font-size: 12px; color: #8B949E; margin-top: 8px; border-top: 1px solid #21262D; padding-top: 6px;">'
-            f'<strong style="color: #E6EDF3;">Macro Catalyst:</strong> {cur_crisis["catalyst"]}'
-            '</div>'
-            '</div>'
-        )
-        st.markdown(crisis_banner_html, unsafe_allow_html=True)
-
-        col_ci1, col_ci2, col_ci3 = st.columns(3)
-
-        with col_ci1:
-            drop_color = "#F47067" if est_port_drop < -30 else "#D29922"
-            cushion_badge = f'<span class="badge-green">+{cushion:.1f}% DEFENSIVE BUFFER</span>' if cushion > 0 else f'<span class="badge-coral">{cushion:.1f}% EXTRA DOWNSIDE</span>'
-            st.markdown(
-                f"""
-                <div class="terminal-card" style="border-top: 2px solid {drop_color};">
-                    <div class="terminal-header">
-                        <span class="terminal-title">PORTFOLIO CRASH DROP</span>
-                        <span class="badge-gold">CAPM SHOCK ESTIMATE</span>
-                    </div>
-                    <div style="padding: 4px 0 10px 0;">
-                        <div style="display: flex; align-items: baseline; gap: 6px;">
-                            <span class="mono-val" style="font-size: 38px; font-weight: 700; color: {drop_color}; line-height: 1;">
-                                {est_port_drop:.1f}%
-                            </span>
-                            <span style="font-size: 12px; color: #8B949E;">loss of capital</span>
-                        </div>
-                    </div>
-                    <div style="border-top: 1px solid #30363D; padding-top: 10px; font-size: 11px; line-height: 1.8;">
-                        <div style="display: flex; justify-content: space-between;">
-                            <span style="color: #8B949E;">Market Sensitivity (Beta β):</span>
-                            <span class="mono-val" style="color: #E6EDF3;">{port_beta:.2f}x</span>
-                        </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 2px;">
-                            <span style="color: #8B949E;">Relative Performance:</span>
-                            {cushion_badge}
-                        </div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
+        if "replay_results" in st.session_state and st.session_state.get("replay_crisis_run") == cur_crisis_key:
+            rep_res = st.session_state["replay_results"]
+            asset_betas = rep_res["asset_betas"]
+            port_beta = rep_res["port_beta"]
+            est_port_drop = rep_res["est_port_drop"]
+            cushion = rep_res["cushion"]
+            nifty_shock = cur_crisis["nifty_drop"]
+            crisis_banner_html = (
+                '<div class="terminal-card" style="padding: 14px 18px; margin-bottom: 14px; background: #161B22; border-left: 3px solid #D4A853;">'
+                '<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">'
+                '<div>'
+                f'<div style="font-size: 14px; font-weight: 700; color: #E6EDF3;">{cur_crisis["name"]}</div>'
+                f'<div style="font-size: 12px; color: #8B949E; margin-top: 2px;">{cur_crisis["dates"]} · <span style="color: #D4A853;">{cur_crisis["regime"]}</span></div>'
+                '</div>'
+                '<div style="text-align: right;">'
+                '<span style="font-size: 11px; color: #8B949E;">NIFTY 50 HISTORICAL DROP:</span> '
+                f'<span class="mono-val" style="font-size: 16px; font-weight: 700; color: #58A6FF;">{nifty_shock:.1f}%</span>'
+                '</div>'
+                '</div>'
+                f'<div style="font-size: 12px; color: #8B949E; margin-top: 8px; border-top: 1px solid #21262D; padding-top: 6px;">'
+                f'<strong style="color: #E6EDF3;">Macro Catalyst:</strong> {cur_crisis["catalyst"]}'
+                '</div>'
+                '</div>'
             )
+            st.markdown(crisis_banner_html, unsafe_allow_html=True)
 
-        with col_ci2:
-            st.markdown(
-                f"""
-                <div class="terminal-card" style="border-top: 2px solid #58A6FF;">
-                    <div class="terminal-header">
-                        <span class="terminal-title">MARKET BENCHMARK CRASH</span>
-                        <span class="badge-muted">NIFTY 50 HISTORICAL</span>
-                    </div>
-                    <div style="padding: 4px 0 10px 0;">
-                        <div style="display: flex; align-items: baseline; gap: 6px;">
-                            <span class="mono-val" style="font-size: 38px; font-weight: 700; color: #58A6FF; line-height: 1;">
-                                {nifty_shock:.1f}%
-                            </span>
-                            <span style="font-size: 12px; color: #8B949E;">index dip</span>
-                        </div>
-                    </div>
-                    <div style="border-top: 1px solid #30363D; padding-top: 10px; font-size: 11px; line-height: 1.8;">
-                        <div style="display: flex; justify-content: space-between;">
-                            <span style="color: #8B949E;">Market Recovery Time:</span>
-                            <span class="mono-val" style="color: #E6EDF3;">{cur_crisis["recovery_days"]} trading days</span>
-                        </div>
-                        <div style="display: flex; justify-content: space-between;">
-                            <span style="color: #8B949E;">Historical Fact:</span>
-                            <span style="color: #D4A853;">Reclaimed pre-crisis high</span>
-                        </div>
-                    </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+            col_ci1, col_ci2, col_ci3 = st.columns(3)
 
-        with col_ci3:
-            # Dynamic Crisis Impact Rating (evaluates actual shock severity for THIS specific crisis)
-            if est_port_drop <= -45.0:
-                impact_label = "CRITICAL SHOCK"
-                impact_color = "#F47067"
-                impact_badge = "CATASTROPHIC CRISIS"
-                impact_sub = f"Severe wealth loss ({'+' if cushion > 0 else ''}{cushion:.1f}% vs Nifty)"
-            elif est_port_drop <= -28.0:
-                impact_label = "HEAVY DRAWDOWN"
-                impact_color = "#F47067" if cushion < 0 else "#D29922"
-                impact_badge = "ACUTE CRISIS SHOCK"
-                impact_sub = f"Deep market dip ({'+' if cushion > 0 else ''}{cushion:.1f}% vs Nifty)"
-            elif est_port_drop <= -18.0:
-                impact_label = "MODERATE PULLBACK"
-                impact_color = "#D29922"
-                impact_badge = "CYCLICAL CORRECTION"
-                impact_sub = f"Manageable drawdown ({'+' if cushion > 0 else ''}{cushion:.1f}% vs Nifty)"
-            else:
-                impact_label = "RESILIENT SHELTER"
-                impact_color = "#3FB68B"
-                impact_badge = "CAPITAL PRESERVED"
-                impact_sub = f"Loss contained under 18% ({'+' if cushion > 0 else ''}{cushion:.1f}% buffer)"
-
-            worst_asset = max(parsed_holdings, key=lambda x: asset_betas.get(x["ticker"], 1.0))
-            worst_t = worst_asset["ticker"].replace(".NS", "")
-            worst_beta = asset_betas.get(worst_asset["ticker"], 1.0)
-            worst_drop = worst_beta * nifty_shock
-
-            st.markdown(
-                f"""
-                <div class="terminal-card" style="border-top: 2px solid {impact_color};">
-                    <div class="terminal-header">
-                        <span class="terminal-title">CRISIS IMPACT SEVERITY</span>
-                        <span class="badge-gold">{impact_badge}</span>
-                    </div>
-                    <div style="padding: 4px 0 10px 0;">
-                        <div style="display: flex; align-items: baseline; gap: 6px;">
-                            <span class="mono-val" style="font-size: 28px; font-weight: 700; color: {impact_color}; line-height: 1.2;">
-                                {impact_label}
-                            </span>
+            with col_ci1:
+                drop_color = "#F47067" if est_port_drop < -30 else "#D29922"
+                cushion_badge = f'<span class="badge-green">+{cushion:.1f}% DEFENSIVE BUFFER</span>' if cushion > 0 else f'<span class="badge-coral">{cushion:.1f}% EXTRA DOWNSIDE</span>'
+                st.markdown(
+                    f"""
+                    <div class="terminal-card" style="border-top: 2px solid {drop_color};">
+                        <div class="terminal-header">
+                            <span class="terminal-title">PORTFOLIO CRASH DROP</span>
+                            <span class="badge-gold">CAPM SHOCK ESTIMATE</span>
+                        </div>
+                        <div style="padding: 4px 0 10px 0;">
+                            <div style="display: flex; align-items: baseline; gap: 6px;">
+                                <span class="mono-val" style="font-size: 38px; font-weight: 700; color: {drop_color}; line-height: 1;">
+                                    {est_port_drop:.1f}%
+                                </span>
+                                <span style="font-size: 12px; color: #8B949E;">loss of capital</span>
+                            </div>
+                        </div>
+                        <div style="border-top: 1px solid #30363D; padding-top: 10px; font-size: 11px; line-height: 1.8;">
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #8B949E;">Market Sensitivity (Beta β):</span>
+                                <span class="mono-val" style="color: #E6EDF3;">{port_beta:.2f}x</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 2px;">
+                                <span style="color: #8B949E;">Relative Performance:</span>
+                                {cushion_badge}
+                            </div>
                         </div>
                     </div>
-                    <div style="border-top: 1px solid #30363D; padding-top: 10px; font-size: 11px; line-height: 1.8;">
-                        <div style="display: flex; justify-content: space-between;">
-                            <span style="color: #8B949E;">Crash Assessment:</span>
-                            <span class="mono-val" style="color: #E6EDF3; font-size: 11px;">{impact_sub}</span>
+                    """,
+                    unsafe_allow_html=True
+                )
+
+            with col_ci2:
+                st.markdown(
+                    f"""
+                    <div class="terminal-card" style="border-top: 2px solid #58A6FF;">
+                        <div class="terminal-header">
+                            <span class="terminal-title">MARKET BENCHMARK CRASH</span>
+                            <span class="badge-muted">NIFTY 50 HISTORICAL</span>
                         </div>
-                        <div style="display: flex; justify-content: space-between;">
-                            <span style="color: #8B949E;">Biggest Stock Dip:</span>
-                            <span class="mono-val" style="color: #F47067;">{html.escape(worst_t)} ({worst_drop:.1f}% drop)</span>
+                        <div style="padding: 4px 0 10px 0;">
+                            <div style="display: flex; align-items: baseline; gap: 6px;">
+                                <span class="mono-val" style="font-size: 38px; font-weight: 700; color: #58A6FF; line-height: 1;">
+                                    {nifty_shock:.1f}%
+                                </span>
+                                <span style="font-size: 12px; color: #8B949E;">index dip</span>
+                            </div>
+                        </div>
+                        <div style="border-top: 1px solid #30363D; padding-top: 10px; font-size: 11px; line-height: 1.8;">
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #8B949E;">Market Recovery Time:</span>
+                                <span class="mono-val" style="color: #E6EDF3;">{cur_crisis["recovery_days"]} trading days</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #8B949E;">Historical Fact:</span>
+                                <span style="color: #D4A853;">Reclaimed pre-crisis high</span>
+                            </div>
                         </div>
                     </div>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
+                    """,
+                    unsafe_allow_html=True
+                )
 
-        with st.expander("Asset-by-Asset Crisis Sensitivity & Historical Listing Audit", expanded=False):
-            table_rows = []
-            for item in parsed_holdings:
-                t = item["ticker"]
-                t_clean = t.replace(".NS", "")
-                w = float(item["weight"]) * 100
-                b = asset_betas.get(t, 1.0)
-                a_drop = b * nifty_shock
-                ipo_year = STOCK_LISTING_YEARS.get(t, 2024)
-                is_listed = ipo_year <= cur_crisis["crisis_year"]
-                if is_listed:
-                    status_badge = f'<span style="color: #3FB68B; font-weight: 600;">Listed (Full Data)</span>'
+            with col_ci3:
+                # Dynamic Crisis Impact Rating (evaluates actual shock severity for THIS specific crisis)
+                if est_port_drop <= -45.0:
+                    impact_label = "CRITICAL SHOCK"
+                    impact_color = "#F47067"
+                    impact_badge = "CATASTROPHIC CRISIS"
+                    impact_sub = f"Severe wealth loss ({'+' if cushion > 0 else ''}{cushion:.1f}% vs Nifty)"
+                elif est_port_drop <= -28.0:
+                    impact_label = "HEAVY DRAWDOWN"
+                    impact_color = "#F47067" if cushion < 0 else "#D29922"
+                    impact_badge = "ACUTE CRISIS SHOCK"
+                    impact_sub = f"Deep market dip ({'+' if cushion > 0 else ''}{cushion:.1f}% vs Nifty)"
+                elif est_port_drop <= -18.0:
+                    impact_label = "MODERATE PULLBACK"
+                    impact_color = "#D29922"
+                    impact_badge = "CYCLICAL CORRECTION"
+                    impact_sub = f"Manageable drawdown ({'+' if cushion > 0 else ''}{cushion:.1f}% vs Nifty)"
                 else:
-                    status_badge = f'<span style="color: #D29922; font-weight: 600;">Listed in {ipo_year} (Proxy Beta Used)</span>'
+                    impact_label = "RESILIENT SHELTER"
+                    impact_color = "#3FB68B"
+                    impact_badge = "CAPITAL PRESERVED"
+                    impact_sub = f"Loss contained under 18% ({'+' if cushion > 0 else ''}{cushion:.1f}% buffer)"
 
-                escaped_t_clean = html.escape(t_clean)
-                table_rows.append(
-                    f'<tr>'
-                    f'<td style="padding: 8px 12px; font-family: \'JetBrains Mono\', monospace; color: #E6EDF3; font-weight: 600;">{escaped_t_clean}</td>'
-                    f'<td style="padding: 8px 12px; font-family: \'JetBrains Mono\', monospace; color: #D4A853;">{w:.1f}%</td>'
-                    f'<td style="padding: 8px 12px; font-family: \'JetBrains Mono\', monospace; color: #E6EDF3;">{b:.2f}x</td>'
-                    f'<td style="padding: 8px 12px; font-family: \'JetBrains Mono\', monospace; color: #F47067; font-weight: 600;">{a_drop:.1f}%</td>'
-                    f'<td style="padding: 8px 12px; font-size: 11px;">{status_badge}</td>'
-                    f'</tr>'
+                worst_asset = max(parsed_holdings, key=lambda x: asset_betas.get(x["ticker"], 1.0))
+                worst_t = worst_asset["ticker"].replace(".NS", "")
+                worst_beta = asset_betas.get(worst_asset["ticker"], 1.0)
+                worst_drop = worst_beta * nifty_shock
+
+                st.markdown(
+                    f"""
+                    <div class="terminal-card" style="border-top: 2px solid {impact_color};">
+                        <div class="terminal-header">
+                            <span class="terminal-title">CRISIS IMPACT SEVERITY</span>
+                            <span class="badge-gold">{impact_badge}</span>
+                        </div>
+                        <div style="padding: 4px 0 10px 0;">
+                            <div style="display: flex; align-items: baseline; gap: 6px;">
+                                <span class="mono-val" style="font-size: 28px; font-weight: 700; color: {impact_color}; line-height: 1.2;">
+                                    {impact_label}
+                                </span>
+                            </div>
+                        </div>
+                        <div style="border-top: 1px solid #30363D; padding-top: 10px; font-size: 11px; line-height: 1.8;">
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #8B949E;">Crash Assessment:</span>
+                                <span class="mono-val" style="color: #E6EDF3; font-size: 11px;">{impact_sub}</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between;">
+                                <span style="color: #8B949E;">Biggest Stock Dip:</span>
+                                <span class="mono-val" style="color: #F47067;">{html.escape(worst_t)} ({worst_drop:.1f}% drop)</span>
+                            </div>
+                        </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True
                 )
 
-            asset_table_html = (
-                '<div style="overflow-x: auto; margin-top: 6px;">'
-                '<table style="width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; background: #10141A; border: 1px solid #30363D; border-radius: 6px;">'
-                '<thead>'
-                '<tr style="border-bottom: 1px solid #30363D; color: #8B949E; text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em;">'
-                '<th style="padding: 8px 12px;">Asset Ticker</th>'
-                '<th style="padding: 8px 12px;">Weight</th>'
-                '<th style="padding: 8px 12px;">Market Beta (β)</th>'
-                '<th style="padding: 8px 12px;">Estimated Shock Drop</th>'
-                '<th style="padding: 8px 12px;">Listing Audit (NSE)</th>'
-                '</tr>'
-                '</thead>'
-                '<tbody>'
-                + "".join(table_rows) +
-                '</tbody>'
-                '</table>'
-                '<div style="font-size: 11px; color: #6E7681; margin-top: 8px;">'
-                'Institutional Transparency: For stocks not yet trading during the historical crisis, we do NOT fabricate artificial historical price points. Their sensitivity is evaluated via the Capital Asset Pricing Model (CAPM) beta applied to the macro shock.'
-                '</div>'
-                '</div>'
-            )
-            st.markdown(asset_table_html, unsafe_allow_html=True)
+            with st.expander("Asset-by-Asset Crisis Sensitivity & Historical Listing Audit", expanded=False):
+                table_rows = []
+                for item in parsed_holdings:
+                    t = item["ticker"]
+                    t_clean = t.replace(".NS", "")
+                    w = float(item["weight"]) * 100
+                    b = asset_betas.get(t, 1.0)
+                    a_drop = b * nifty_shock
+                    ipo_year = STOCK_LISTING_YEARS.get(t, 2024)
+                    is_listed = ipo_year <= cur_crisis["crisis_year"]
+                    if is_listed:
+                        status_badge = f'<span style="color: #3FB68B; font-weight: 600;">Listed (Full Data)</span>'
+                    else:
+                        status_badge = f'<span style="color: #D29922; font-weight: 600;">Listed in {ipo_year} (Proxy Beta Used)</span>'
 
-        st.markdown("<div style='height: 18px;'></div>", unsafe_allow_html=True)
+                    escaped_t_clean = html.escape(t_clean)
+                    table_rows.append(
+                        f'<tr>'
+                        f'<td style="padding: 8px 12px; font-family: \'JetBrains Mono\', monospace; color: #E6EDF3; font-weight: 600;">{escaped_t_clean}</td>'
+                        f'<td style="padding: 8px 12px; font-family: \'JetBrains Mono\', monospace; color: #D4A853;">{w:.1f}%</td>'
+                        f'<td style="padding: 8px 12px; font-family: \'JetBrains Mono\', monospace; color: #E6EDF3;">{b:.2f}x</td>'
+                        f'<td style="padding: 8px 12px; font-family: \'JetBrains Mono\', monospace; color: #F47067; font-weight: 600;">{a_drop:.1f}%</td>'
+                        f'<td style="padding: 8px 12px; font-size: 11px;">{status_badge}</td>'
+                        f'</tr>'
+                    )
 
-        # ---------------------------------------------------------------------
-        # SECTION 2: FORWARD SIMULATION ENGINE (1,000 MONTE CARLO PATHS)
-        # ---------------------------------------------------------------------
-        st.markdown(
-            """
-            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding: 4px 0 10px 0; margin-bottom: 14px;">
-                <div style="font-size: 13px; font-weight: 700; color: #D4A853; text-transform: uppercase; letter-spacing: 0.05em;">
-                    Section 2 // Forward Simulation Engine (1,000 Monte Carlo Paths)
-                </div>
-                <span class="badge-gold">1,000 FORWARD RUNS</span>
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
-
-        col_st1, col_st2, col_st3 = st.columns(3)
-
-        with col_st1:
-            is_b1 = (st.session_state["stress_multiplier"] == 1.0)
-            if st.button("Normal Market (1.0x Vol)", key="btn_stress_10", use_container_width=True, type="primary" if is_b1 else "secondary"):
-                st.session_state["stress_multiplier"] = 1.0
-                st.rerun()
-
-        with col_st2:
-            is_b2 = (st.session_state["stress_multiplier"] == 1.25)
-            if st.button("Elevated Volatility (+25% Shock)", key="btn_stress_125", use_container_width=True, type="primary" if is_b2 else "secondary"):
-                st.session_state["stress_multiplier"] = 1.25
-                st.rerun()
-
-        with col_st3:
-            is_b3 = (st.session_state["stress_multiplier"] == 1.50)
-            if st.button("Severe Market Crash (+50% Turmoil)", key="btn_stress_150", use_container_width=True, type="primary" if is_b3 else "secondary"):
-                st.session_state["stress_multiplier"] = 1.50
-                st.rerun()
-
-        cur_mult = st.session_state["stress_multiplier"]
-
-        def run_monte_carlo_stress(fwd_vol, stress_mult=1.0, n_sims=1000, horizon_days=21, seed=42):
-            np.random.seed(seed)
-            dt = 1.0 / 252.0
-            sigma = fwd_vol * stress_mult
-            drift = -0.5 * (sigma ** 2) * dt
-            diffusion = sigma * np.sqrt(dt) * np.random.normal(0, 1, size=(n_sims, horizon_days))
-            daily_log_returns = drift + diffusion
-            
-            # QS-12: Geometric compounding for wealth paths (W_0 = 1.0)
-            wealth_trajectories = np.exp(np.cumsum(daily_log_returns, axis=1))
-            wealth_trajectories = np.hstack([np.ones((n_sims, 1)), wealth_trajectories])
-            cum_paths = (wealth_trajectories - 1.0) * 100.0
-
-            # Path Drawdown calculation per simulation run (W_t - Peak_t) / Peak_t
-            running_peaks = np.maximum.accumulate(wealth_trajectories, axis=1)
-            path_drawdowns = (wealth_trajectories - running_peaks) / running_peaks
-            max_dd_per_path = np.abs(np.min(path_drawdowns, axis=1)) * 100.0
-
-            terminal_returns = cum_paths[:, -1]
-            var_95 = float(np.percentile(terminal_returns, 5))
-            cvar_95 = float(terminal_returns[terminal_returns <= var_95].mean())
-            median_path = np.median(cum_paths, axis=0)
-            p5_path = np.percentile(cum_paths, 5, axis=0)
-            p95_path = np.percentile(cum_paths, 95, axis=0)
-            worst_terminal_loss = float(terminal_returns.min())
-            worst_path_dd = float(max_dd_per_path.max())
-            p95_path_dd = float(np.percentile(max_dd_per_path, 95))
-            prob_loss_5 = float((terminal_returns < -5.0).mean() * 100.0)
-
-            return {
-                "cum_paths": cum_paths,
-                "median_path": median_path,
-                "p5_path": p5_path,
-                "p95_path": p95_path,
-                "var_95": abs(var_95),
-                "cvar_95": abs(cvar_95),
-                "worst_terminal_loss": abs(worst_terminal_loss),
-                "worst_path_dd": abs(worst_path_dd),
-                "p95_path_dd": abs(p95_path_dd),
-                "prob_loss_5": prob_loss_5,
-                "sigma_annualized": sigma * 100.0
-            }
-
-        mc_res = run_monte_carlo_stress(fwd_vol, stress_mult=cur_mult)
-
-        col_mc_chart, col_mc_stats = st.columns([6, 4])
-
-        with col_mc_chart:
-            st.markdown(
-                f"""
-                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding-bottom: 6px; margin-bottom: 10px;">
-                    <span class="terminal-title">21-Day Forward Path Trajectories</span>
-                    <span class="badge-gold">PROJECTED VOL: {mc_res['sigma_annualized']:.1f}%/YR</span>
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-
-            fig_mc = go.Figure()
-            days_axis = list(range(22))
-
-            for path_idx in range(0, 50):
-                fig_mc.add_trace(go.Scatter(
-                    x=days_axis,
-                    y=mc_res["cum_paths"][path_idx],
-                    mode='lines',
-                    line=dict(color='rgba(88, 166, 255, 0.08)', width=1),
-                    hoverinfo='skip',
-                    showlegend=False
-                ))
-
-            fig_mc.add_trace(go.Scatter(
-                x=days_axis,
-                y=mc_res["p95_path"],
-                mode='lines',
-                name="Top 5% Best Case (95th Pct)",
-                line=dict(color='#3FB68B', width=1.8),
-                hovertemplate="Day +%{x}: +%{y:.2f}% gain<extra>Top 5% Best Case</extra>"
-            ))
-
-            fig_mc.add_trace(go.Scatter(
-                x=days_axis,
-                y=mc_res["median_path"],
-                mode='lines',
-                name="Expected Path (Median)",
-                line=dict(color='#D4A853', width=2.2),
-                hovertemplate="Day +%{x}: %{y:.2f}%<extra>Expected Center Path</extra>"
-            ))
-
-            fig_mc.add_trace(go.Scatter(
-                x=days_axis,
-                y=mc_res["p5_path"],
-                mode='lines',
-                name="Safe Downside Limit (95% VaR)",
-                line=dict(color='#F47067', width=2.2),
-                hovertemplate="Day +%{x}: %{y:.2f}% loss<extra>Safe Downside Limit (95% VaR)</extra>"
-            ))
-
-            fig_mc.add_hline(y=0.0, line_dash="dash", line_color="#484F58", line_width=1)
-
-            fig_mc.update_layout(
-                template="plotly_dark",
-                paper_bgcolor="#161B22",
-                plot_bgcolor="#161B22",
-                margin=dict(l=40, r=20, t=30, b=30),
-                height=350,
-                font=dict(family="JetBrains Mono", color="#8B949E", size=10),
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom",
-                    y=1.03,
-                    xanchor="right",
-                    x=1,
-                    font=dict(size=10, color="#E6EDF3", family="Inter")
-                ),
-                xaxis=dict(
-                    showgrid=True,
-                    gridcolor="#21262D",
-                    zeroline=False,
-                    tickfont=dict(color="#8B949E", size=10),
-                    title=dict(text="Forward Trading Days (t to t+21d)", font=dict(size=10, color="#6E7681"))
-                ),
-                yaxis=dict(
-                    showgrid=True,
-                    gridcolor="#21262D",
-                    ticksuffix="%",
-                    zeroline=True,
-                    zerolinecolor="#30363D",
-                    tickfont=dict(color="#8B949E", size=10)
+                asset_table_html = (
+                    '<div style="overflow-x: auto; margin-top: 6px;">'
+                    '<table style="width: 100%; border-collapse: collapse; font-size: 12px; text-align: left; background: #10141A; border: 1px solid #30363D; border-radius: 6px;">'
+                    '<thead>'
+                    '<tr style="border-bottom: 1px solid #30363D; color: #8B949E; text-transform: uppercase; font-size: 10px; letter-spacing: 0.05em;">'
+                    '<th style="padding: 8px 12px;">Asset Ticker</th>'
+                    '<th style="padding: 8px 12px;">Weight</th>'
+                    '<th style="padding: 8px 12px;">Market Beta (β)</th>'
+                    '<th style="padding: 8px 12px;">Estimated Shock Drop</th>'
+                    '<th style="padding: 8px 12px;">Listing Audit (NSE)</th>'
+                    '</tr>'
+                    '</thead>'
+                    '<tbody>'
+                    + "".join(table_rows) +
+                    '</tbody>'
+                    '</table>'
+                    '<div style="font-size: 11px; color: #6E7681; margin-top: 8px;">'
+                    'Institutional Transparency: For stocks not yet trading during the historical crisis, we do NOT fabricate artificial historical price points. Their sensitivity is evaluated via the Capital Asset Pricing Model (CAPM) beta applied to the macro shock.'
+                    '</div>'
+                    '</div>'
                 )
-            )
-            st.plotly_chart(fig_mc, use_container_width=True)
+                st.markdown(asset_table_html, unsafe_allow_html=True)
 
-        with col_mc_stats:
+        else:
             st.markdown(
                 """
-                <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding-bottom: 6px; margin-bottom: 10px;">
-                    <span class="terminal-title">Projected Loss Scenarios (% of Capital)</span>
-                    <span class="badge-gold">N=1,000 RUNS</span>
+                <div class="terminal-card" style="padding: 20px; border-left: 3px solid #D4A853; margin-top: 14px;">
+                    <div style="font-size: 15px; font-weight: 700; color: #E6EDF3; margin-bottom: 6px;">
+                        Want to see how your portfolio responds to major market crashes?
+                    </div>
+                    <div style="font-size: 13px; color: #8B949E; line-height: 1.5; margin-bottom: 12px;">
+                        Estimates your portfolio's capital drop during India's greatest market downturns (2020 COVID Flash Crash, 2008 Global Financial Crisis, 2013 Taper Tantrum, and 2022 Rate Shock) using empirical asset sensitivity.
+                    </div>
+                    <div style="font-size: 12px; color: #D4A853; font-weight: 600;">
+                        Select a historical crisis above and click <strong>Run Crisis Shock Analysis</strong> to estimate your portfolio's capital drop.
+                    </div>
                 </div>
                 """,
                 unsafe_allow_html=True
             )
-
-            stress_name = "Normal Market Conditions" if cur_mult == 1.0 else ("Elevated Volatility (+25%)" if cur_mult == 1.25 else "Severe Market Crisis (+50%)")
-            var_1lakh = int(round(mc_res["var_95"] * 1000))
-            cvar_1lakh = int(round(mc_res["cvar_95"] * 1000))
-
-            tail_metrics_html = (
-                '<div class="terminal-card" style="padding: 16px 18px; margin-bottom: 0;">'
-                '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 14px;">'
-                '<div style="background-color: #10141A; border: 1px solid #30363D; padding: 10px; border-radius: 6px;">'
-                '<div style="font-size: 11px; font-weight: 600; color: #E6EDF3; text-transform: uppercase;">Safe Downside Limit</div>'
-                '<div style="font-size: 10px; color: #58A6FF; margin-top: 1px;">21-Day VaR (95% Confidence)</div>'
-                f'<div class="mono-val" style="font-size: 22px; font-weight: 700; color: #D29922; margin-top: 3px;">-{mc_res["var_95"]:.2f}%</div>'
-                '<div style="font-size: 10px; color: #8B949E; margin-top: 3px;">95% chance losses won\'t exceed this % of capital</div>'
-                '</div>'
-                '<div style="background-color: #10141A; border: 1px solid #30363D; padding: 10px; border-radius: 6px;">'
-                '<div style="font-size: 11px; font-weight: 600; color: #E6EDF3; text-transform: uppercase;">Severe Crash Average</div>'
-                '<div style="font-size: 10px; color: #58A6FF; margin-top: 1px;">Expected Shortfall (CVaR)</div>'
-                f'<div class="mono-val" style="font-size: 22px; font-weight: 700; color: #F47067; margin-top: 3px;">-{mc_res["cvar_95"]:.2f}%</div>'
-                '<div style="font-size: 10px; color: #8B949E; margin-top: 3px;">Average loss if an extreme 1-in-20 crash strikes</div>'
-                '</div>'
-                '<div style="background-color: #10141A; border: 1px solid #30363D; padding: 10px; border-radius: 6px;">'
-                '<div style="font-size: 11px; font-weight: 600; color: #E6EDF3; text-transform: uppercase;">Worst Simulated Drawdown</div>'
-                '<div style="font-size: 10px; color: #58A6FF; margin-top: 1px;">Intra-Period Path MaxDD</div>'
-                f'<div class="mono-val" style="font-size: 22px; font-weight: 700; color: #F47067; margin-top: 3px;">-{mc_res["worst_path_dd"]:.2f}%</div>'
-                f'<div style="font-size: 10px; color: #8B949E; margin-top: 3px;">Deepest trough reached before day 21 (95th pct: -{mc_res["p95_path_dd"]:.1f}%)</div>'
-                '</div>'
-                '<div style="background-color: #10141A; border: 1px solid #30363D; padding: 10px; border-radius: 6px;">'
-                '<div style="font-size: 11px; font-weight: 600; color: #E6EDF3; text-transform: uppercase;">Chance of Major Dip</div>'
-                '<div style="font-size: 10px; color: #58A6FF; margin-top: 1px;">Probability of >5% Loss</div>'
-                f'<div class="mono-val" style="font-size: 22px; font-weight: 700; color: #D4A853; margin-top: 3px;">{mc_res["prob_loss_5"]:.1f}%</div>'
-                '<div style="font-size: 10px; color: #8B949E; margin-top: 3px;">Probability of losing more than 5% of your money</div>'
-                '</div>'
-                '</div>'
-                '<div style="font-size: 13px; line-height: 1.6; color: #E6EDF3; border-top: 1px solid #30363D; padding-top: 10px;">'
-                '<div style="font-size: 11px; font-weight: 600; color: #D4A853; text-transform: uppercase; margin-bottom: 4px;">EXECUTIVE STRESS BRIEF</div>'
-                f'<div>Under <strong>{stress_name}</strong>, projected portfolio drawdown scenarios over 21 trading days:</div>'
-                f'<div style="margin-top: 5px; font-size: 12px; color: #C9D1D9;">'
-                f'• <strong>Safe Limit (VaR):</strong> 95% of simulated 21-day runs stay above <strong>-{mc_res["var_95"]:.1f}%</strong> (e.g. ₹{var_1lakh:,} max loss on ₹1,00,000).<br>'
-                f'• <strong>Tail Crash (CVaR):</strong> In the worst 5% of market crashes, expected losses average <strong>-{mc_res["cvar_95"]:.1f}%</strong> (e.g. ₹{cvar_1lakh:,} loss on ₹1,00,000).<br>'
-                f'• <strong>Path Drawdown Risk:</strong> 95% of simulated runs limit maximum intra-period dip to <strong>-{mc_res["p95_path_dd"]:.1f}%</strong> (worst single-path trough: -{mc_res["worst_path_dd"]:.1f}%).'
-                f'</div>'
-                '<div style="margin-top: 8px; font-size: 11px; color: #8B949E; border-top: 1px dashed #30363D; padding-top: 6px;">'
-                '<strong>Investor Takeaway:</strong> Size position weights so you can comfortably endure the <em>Severe Crash Average (CVaR)</em> without panic-selling at the bottom.'
-                '</div>'
-                '</div>'
-                '</div>'
-            )
-            st.markdown(tail_metrics_html, unsafe_allow_html=True)
-
-        st.markdown(
-            """
-            <div style="font-size: 11px; color: #6E7681; margin-top: 16px; border-top: 1px solid #30363D; padding-top: 10px;">
-                <strong>Methodology & Governance:</strong> (1) Historical crisis impacts use Sharpe (1964) CAPM Beta sensitivity. (2) Monte Carlo uses 1,000 Geometric Brownian Motion paths with zero-drift risk neutrality (Black-Scholes-Merton 1973). (3) Tail metrics follow Basel III Expected Shortfall standards. Stocks unlisted during historical crises are explicitly flagged without fabricated price feeds.
-            </div>
-            """,
-            unsafe_allow_html=True
-        )
 
 
 # =============================================================================
-# TAB 3: TRACK RECORD & ECONOMETRIC AUDIT
+# TAB 4: MODEL TRACK RECORD & ECONOMETRIC AUDIT
 # =============================================================================
 with tab_record:
     # -------------------------------------------------------------------------
-    # STEP 1: 3 HUMAN-FIRST RELIABILITY & ACCURACY CARDS
+    # STEP 1: 3 ACCURATE & HONEST RELIABILITY CARDS
     # -------------------------------------------------------------------------
     tab3_header_html = (
         '<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding: 4px 0 10px 0; margin-bottom: 14px;">'
         '<div>'
         '<div style="font-size: 13px; font-weight: 700; color: #D4A853; text-transform: uppercase; letter-spacing: 0.05em;">'
-        'Model Reliability & Real-World Track Record'
+        'Model Track Record & Empirical Benchmark Audit'
         '</div>'
         '<div style="font-size: 11px; color: #8B949E; margin-top: 2px;">'
-        'How accurately does QuantShield forecast risk compared to standard banking formulas?'
+        'How does QuantShield compare against classical banking formulas on strictly unseen future data?'
         '</div>'
         '</div>'
-        '<span class="badge-gold">18 YEARS TESTED (2008–2026)</span>'
+        '<span class="badge-gold">4,917 FORECASTS // 825 DATES</span>'
         '</div>'
     )
     st.markdown(tab3_header_html, unsafe_allow_html=True)
@@ -1967,36 +2118,36 @@ with tab_record:
         card1_html = (
             '<div class="terminal-card" style="border-top: 2px solid #D4A853;">'
             '<div class="terminal-header">'
-            '<span class="terminal-title">MARKET TURBULENCE FORECAST</span>'
-            '<span class="badge-gold">VS TRADITIONAL FORMULA</span>'
+            '<span class="terminal-title">MARKET TURBULENCE (VOLATILITY)</span>'
+            '<span class="badge-gold">ON PAR WITH EWMA (p=0.116)</span>'
             '</div>'
             '<div style="padding: 2px 0 8px 0;">'
             '<div style="font-size: 11px; color: #8B949E; text-transform: uppercase;">'
-            'Typical Forecast Margin (Error Range)'
+            'Typical 21-Day Forecast Error'
             '</div>'
             '<div style="display: flex; align-items: baseline; gap: 8px; margin-top: 4px;">'
             '<span class="mono-val" style="font-size: 36px; font-weight: 700; color: #D4A853; line-height: 1;">'
             '±5.59%'
             '</span>'
-            '<span style="font-size: 11px; color: #8B949E;">Average Error Margin</span>'
+            '<span style="font-size: 11px; color: #8B949E;">QuantShield MAE</span>'
             '</div>'
             '</div>'
             '<div style="border-top: 1px solid #30363D; padding-top: 8px; font-size: 11px; line-height: 1.7;">'
             '<div style="display: flex; justify-content: space-between;">'
-            '<span style="color: #8B949E;">Traditional Banking Formula:</span>'
-            '<span class="mono-val" style="color: #E6EDF3;">±5.78% margin</span>'
+            '<span style="color: #8B949E;">J.P. Morgan EWMA Baseline:</span>'
+            '<span class="mono-val" style="color: #E6EDF3;">±5.78% MAE</span>'
             '</div>'
             '<div style="display: flex; justify-content: space-between; align-items: center;">'
-            '<span style="color: #8B949E;">Accuracy Improvement:</span>'
-            '<span class="badge-green">+0.18% Better Precision</span>'
+            '<span style="color: #8B949E;">Statistical Assessment:</span>'
+            '<span class="badge-gold">Statistical Tie (p = 0.116)</span>'
             '</div>'
             '<div style="display: flex; justify-content: space-between;">'
-            '<span style="color: #8B949E;">Market Swings Captured:</span>'
-            '<span class="mono-val" style="color: #E6EDF3;">32.5% (vs 22.7% traditional)</span>'
+            '<span style="color: #8B949E;">Win Rate vs EWMA:</span>'
+            '<span class="mono-val" style="color: #E6EDF3;">49.4% (Dead heat)</span>'
             '</div>'
             '</div>'
             '<div style="border-top: 1px solid #21262D; margin-top: 8px; padding-top: 8px; font-size: 11px; color: #8B949E; line-height: 1.4;">'
-            '<em>On any given month, predictions stay within ~5% of actual swings, tracking 43% more market movement patterns than classical formulas.</em>'
+            '<em>On pure volatility, our model does not statistically beat J.P. Morgan EWMA (p=0.116). Both methods perform essentially identically overall.</em>'
             '</div>'
             '</div>'
         )
@@ -2006,36 +2157,36 @@ with tab_record:
         card2_html = (
             '<div class="terminal-card" style="border-top: 2px solid #3FB68B;">'
             '<div class="terminal-header">'
-            '<span class="terminal-title">CRASH & SEVERE DROP WARNING</span>'
-            '<span class="badge-green">HIGH ACCURACY (p < 0.001)</span>'
+            '<span class="terminal-title">CRASH & DOWNSIDE DROP (DRAWDOWN)</span>'
+            '<span class="badge-green">GENUINE EDGE (p < 0.0001)</span>'
             '</div>'
             '<div style="padding: 2px 0 8px 0;">'
             '<div style="font-size: 11px; color: #8B949E; text-transform: uppercase;">'
-            '21-Day Downside Drop Margin'
+            '21-Day Downside Drop Error'
             '</div>'
             '<div style="display: flex; align-items: baseline; gap: 8px; margin-top: 4px;">'
             '<span class="mono-val" style="font-size: 36px; font-weight: 700; color: #3FB68B; line-height: 1;">'
             '±2.86%'
             '</span>'
-            '<span style="font-size: 11px; color: #8B949E;">Typical Drop Error</span>'
+            '<span style="font-size: 11px; color: #8B949E;">QuantShield MAE</span>'
             '</div>'
             '</div>'
             '<div style="border-top: 1px solid #30363D; padding-top: 8px; font-size: 11px; line-height: 1.7;">'
             '<div style="display: flex; justify-content: space-between;">'
-            '<span style="color: #8B949E;">Historical Average Formula:</span>'
-            '<span class="mono-val" style="color: #E6EDF3;">±3.35% margin</span>'
+            '<span style="color: #8B949E;">Historical Average Baseline:</span>'
+            '<span class="mono-val" style="color: #E6EDF3;">±3.35% MAE</span>'
             '</div>'
             '<div style="display: flex; justify-content: space-between; align-items: center;">'
-            '<span style="color: #8B949E;">Warning Accuracy Lift:</span>'
-            '<span class="badge-green">+0.49% Better Precision</span>'
+            '<span style="color: #8B949E;">Statistical Significance:</span>'
+            '<span class="badge-green">p < 0.0001 (Superior)</span>'
             '</div>'
             '<div style="display: flex; justify-content: space-between;">'
-            '<span style="color: #8B949E;">Days Ahead of Baseline:</span>'
-            '<span class="mono-val" style="color: #3FB68B; font-weight: 600;">63.8% of trading days</span>'
+            '<span style="color: #8B949E;">Win Rate vs Historical Mean:</span>'
+            '<span class="mono-val" style="color: #3FB68B; font-weight: 600;">63.8% of forecasts</span>'
             '</div>'
             '</div>'
             '<div style="border-top: 1px solid #21262D; margin-top: 8px; padding-top: 8px; font-size: 11px; color: #8B949E; line-height: 1.4;">'
-            '<em>Accurately anticipates the worst 21-day drops on 64 out of every 100 days, giving you vital early warnings before severe drawdowns.</em>'
+            '<em>Where EWMA cannot predict drawdowns, QuantShield provides a statistically verified early warning on forward capital drops (winning on 64 of 100 forecasts).</em>'
             '</div>'
             '</div>'
         )
@@ -2045,36 +2196,36 @@ with tab_record:
         card3_html = (
             '<div class="terminal-card" style="border-top: 2px solid #58A6FF;">'
             '<div class="terminal-header">'
-            '<span class="terminal-title">REAL-WORLD TESTING INTEGRITY</span>'
-            '<span class="badge-muted">STRICTLY UNSEEN DATA</span>'
+            '<span class="terminal-title">EVALUATION RIGOR & HONESTY</span>'
+            '<span class="badge-muted">OUT-OF-FOLD AUDIT</span>'
             '</div>'
             '<div style="padding: 2px 0 8px 0;">'
             '<div style="font-size: 11px; color: #8B949E; text-transform: uppercase;">'
-            'Real Market Days Evaluated'
+            'Evaluated Portfolio Forecasts'
             '</div>'
             '<div style="display: flex; align-items: baseline; gap: 8px; margin-top: 4px;">'
             '<span class="mono-val" style="font-size: 36px; font-weight: 700; color: #58A6FF; line-height: 1;">'
             '4,917'
             '</span>'
-            '<span style="font-size: 11px; color: #8B949E;">trading days</span>'
+            '<span style="font-size: 11px; color: #8B949E;">forecasts</span>'
             '</div>'
             '</div>'
             '<div style="border-top: 1px solid #30363D; padding-top: 8px; font-size: 11px; line-height: 1.7;">'
             '<div style="display: flex; justify-content: space-between;">'
-            '<span style="color: #8B949E;">Historical Span:</span>'
-            '<span class="mono-val" style="color: #E6EDF3;">2008 GFC through 2026</span>'
+            '<span style="color: #8B949E;">Total Ingested Data:</span>'
+            '<span class="mono-val" style="color: #E6EDF3;">2008–2026 (18 Years)</span>'
             '</div>'
             '<div style="display: flex; justify-content: space-between;">'
-            '<span style="color: #8B949E;">Independent Dates Sampled:</span>'
-            '<span class="mono-val" style="color: #E6EDF3;">825 trading dates</span>'
+            '<span style="color: #8B949E;">Initial Model Training:</span>'
+            '<span class="mono-val" style="color: #8B949E;">2008–2012 (Fold 1 Warm-up)</span>'
             '</div>'
             '<div style="display: flex; justify-content: space-between;">'
-            '<span style="color: #8B949E;">Testing Honesty:</span>'
-            '<span style="color: #3FB68B; font-weight: 600;">Zero Cheating (Purged)</span>'
+            '<span style="color: #8B949E;">Tested Evaluation Period:</span>'
+            '<span class="mono-val" style="color: #58A6FF; font-weight: 600;">2012–2026 (825 Dates)</span>'
             '</div>'
             '</div>'
             '<div style="border-top: 1px solid #21262D; margin-top: 8px; padding-top: 8px; font-size: 11px; color: #8B949E; line-height: 1.4;">'
-            '<em>Tested strictly on future days the model had never seen before. No hindsight bias and no curve-fitting on past crashes.</em>'
+            '<em>Data starts in 2008. The first 4 years (2008–2012) train Fold 1, so the out-of-fold tests run strictly on future unseen dates (2012–2026) with zero lookahead bias.</em>'
             '</div>'
             '</div>'
         )
@@ -2089,15 +2240,15 @@ with tab_record:
         chart_header_html = (
             '<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding-bottom: 6px; margin-bottom: 10px;">'
             '<div>'
-            '<span class="terminal-title">Performance Under Different Market Conditions</span>'
+            '<span class="terminal-title">Performance Across Volatility Conditions</span>'
             '</div>'
-            '<span class="badge-gold">LOWER BAR = MORE ACCURATE</span>'
+            '<span class="badge-gold">LOWER BAR = SMALLER ERROR</span>'
             '</div>'
         )
         st.markdown(chart_header_html, unsafe_allow_html=True)
 
         # Build Grouped Bar Chart comparing CatBoost vs EWMA across 3 conditions
-        regimes = ["Quiet / Calm Markets", "Normal Trading Markets", "High Panic & Crises"]
+        regimes = ["Quiet / Calm (<16.5% Vol)", "Normal Trading (16.5–23%)", "High Panic & Crises (>23%)"]
         catboost_mae = [5.76, 3.31, 7.71]
         ewma_mae = [4.19, 4.47, 8.67]
 
@@ -2116,7 +2267,7 @@ with tab_record:
         fig_regime.add_trace(go.Bar(
             x=regimes,
             y=ewma_mae,
-            name="Traditional Banking Formula",
+            name="J.P. Morgan EWMA Baseline",
             marker_color="#58A6FF",
             text=[f"±{v:.2f}%" for v in ewma_mae],
             textposition="outside",
@@ -2141,7 +2292,7 @@ with tab_record:
             ),
             xaxis=dict(
                 showgrid=False,
-                tickfont=dict(color="#E6EDF3", size=11)
+                tickfont=dict(color="#E6EDF3", size=10)
             ),
             yaxis=dict(
                 showgrid=True,
@@ -2158,9 +2309,9 @@ with tab_record:
         audit_header_html = (
             '<div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #30363D; padding-bottom: 6px; margin-bottom: 10px;">'
             '<div>'
-            '<span class="terminal-title">QuantShield AI vs. Traditional Formula</span>'
+            '<span class="terminal-title">Factual Side-by-Side Comparison</span>'
             '</div>'
-            '<span class="badge-gold">HONEST COMPARISON</span>'
+            '<span class="badge-gold">VERIFIED METRICS</span>'
             '</div>'
         )
         st.markdown(audit_header_html, unsafe_allow_html=True)
@@ -2169,45 +2320,45 @@ with tab_record:
             '<div class="terminal-card" style="padding: 12px 14px; margin-bottom: 0;">'
             '<table style="width: 100%; border-collapse: collapse; font-size: 11px; text-align: left; margin-bottom: 10px;">'
             '<tr style="border-bottom: 1px solid #30363D; color: #8B949E; font-size: 10px; text-transform: uppercase;">'
-            '<th style="padding: 4px 6px;">What We Tested</th>'
-            '<th style="padding: 4px 6px;">QuantShield AI</th>'
-            '<th style="padding: 4px 6px;">Traditional</th>'
-            '<th style="padding: 4px 6px;">Why It Matters To You</th>'
+            '<th style="padding: 4px 6px;">Evaluation Dimension</th>'
+            '<th style="padding: 4px 6px;">QuantShield</th>'
+            '<th style="padding: 4px 6px;">Baseline</th>'
+            '<th style="padding: 4px 6px;">Empirical Takeaway</th>'
             '</tr>'
             '<tr style="border-bottom: 1px solid #21262D;">'
-            '<td style="padding: 6px; color: #E6EDF3; font-weight: 500;">Predicting Severe Drops</td>'
+            '<td style="padding: 6px; color: #E6EDF3; font-weight: 500;">Predicting Severe Drops (MaxDD)</td>'
             '<td style="padding: 6px; color: #3FB68B; font-family: \'JetBrains Mono\', monospace;">±2.86%</td>'
             '<td style="padding: 6px; color: #8B949E; font-family: \'JetBrains Mono\', monospace;">±3.35%</td>'
-            '<td style="padding: 6px; color: #3FB68B; font-size: 10px;">Catches drops earlier (p < 0.001)</td>'
+            '<td style="padding: 6px; color: #3FB68B; font-size: 10px;">Statistically superior (p < 0.0001)</td>'
             '</tr>'
             '<tr style="border-bottom: 1px solid #21262D;">'
-            '<td style="padding: 6px; color: #E6EDF3; font-weight: 500;">Tracking Market Swings</td>'
-            '<td style="padding: 6px; color: #D4A853; font-family: \'JetBrains Mono\', monospace;">32.5% captured</td>'
-            '<td style="padding: 6px; color: #8B949E; font-family: \'JetBrains Mono\', monospace;">22.7% captured</td>'
-            '<td style="padding: 6px; color: #D4A853; font-size: 10px;">+43% more dynamics tracked</td>'
+            '<td style="padding: 6px; color: #E6EDF3; font-weight: 500;">Volatility Forecasting (Overall)</td>'
+            '<td style="padding: 6px; color: #D4A853; font-family: \'JetBrains Mono\', monospace;">±5.59%</td>'
+            '<td style="padding: 6px; color: #8B949E; font-family: \'JetBrains Mono\', monospace;">±5.78%</td>'
+            '<td style="padding: 6px; color: #D4A853; font-size: 10px;">Statistical tie vs EWMA (p = 0.116)</td>'
             '</tr>'
             '<tr style="border-bottom: 1px solid #21262D;">'
-            '<td style="padding: 6px; color: #E6EDF3; font-weight: 500;">Normal Everyday Markets</td>'
-            '<td style="padding: 6px; color: #3FB68B; font-family: \'JetBrains Mono\', monospace;">±3.31% error</td>'
-            '<td style="padding: 6px; color: #8B949E; font-family: \'JetBrains Mono\', monospace;">±4.47% error</td>'
-            '<td style="padding: 6px; color: #3FB68B; font-size: 10px;">Wins 65% of trading days</td>'
+            '<td style="padding: 6px; color: #E6EDF3; font-weight: 500;">Calm Markets (< 16.5% Vol)</td>'
+            '<td style="padding: 6px; color: #8B949E; font-family: \'JetBrains Mono\', monospace;">±5.76%</td>'
+            '<td style="padding: 6px; color: #3FB68B; font-family: \'JetBrains Mono\', monospace;">±4.19%</td>'
+            '<td style="padding: 6px; color: #58A6FF; font-size: 10px;">Baseline wins: EWMA better when calm</td>'
             '</tr>'
             '<tr style="border-bottom: 1px solid #21262D;">'
-            '<td style="padding: 6px; color: #E6EDF3; font-weight: 500;">High Panic / Crises</td>'
-            '<td style="padding: 6px; color: #3FB68B; font-family: \'JetBrains Mono\', monospace;">±7.71% error</td>'
-            '<td style="padding: 6px; color: #F47067; font-family: \'JetBrains Mono\', monospace;">±8.67% error</td>'
-            '<td style="padding: 6px; color: #3FB68B; font-size: 10px;">Safer alerts during crashes</td>'
+            '<td style="padding: 6px; color: #E6EDF3; font-weight: 500;">Normal Markets (16.5–23% Vol)</td>'
+            '<td style="padding: 6px; color: #3FB68B; font-family: \'JetBrains Mono\', monospace;">±3.31%</td>'
+            '<td style="padding: 6px; color: #8B949E; font-family: \'JetBrains Mono\', monospace;">±4.47%</td>'
+            '<td style="padding: 6px; color: #3FB68B; font-size: 10px;">QuantShield wins (65.5% of forecasts)</td>'
             '</tr>'
             '<tr>'
-            '<td style="padding: 6px; color: #E6EDF3; font-weight: 500;">Quiet Range-Bound Days</td>'
-            '<td style="padding: 6px; color: #8B949E; font-family: \'JetBrains Mono\', monospace;">±5.76% error</td>'
-            '<td style="padding: 6px; color: #3FB68B; font-family: \'JetBrains Mono\', monospace;">±4.19% error</td>'
-            '<td style="padding: 6px; color: #8B949E; font-size: 10px;">Simple formulas win when calm</td>'
+            '<td style="padding: 6px; color: #E6EDF3; font-weight: 500;">Panic & Crises (> 23% Vol)</td>'
+            '<td style="padding: 6px; color: #3FB68B; font-family: \'JetBrains Mono\', monospace;">±7.71%</td>'
+            '<td style="padding: 6px; color: #F47067; font-family: \'JetBrains Mono\', monospace;">±8.67%</td>'
+            '<td style="padding: 6px; color: #3FB68B; font-size: 10px;">QuantShield wins (57.4% of forecasts)</td>'
             '</tr>'
             '</table>'
             '<div style="font-size: 11px; line-height: 1.45; color: #E6EDF3; border-top: 1px solid #30363D; padding-top: 8px;">'
-            '<div style="font-size: 11px; font-weight: 600; color: #D4A853; text-transform: uppercase; margin-bottom: 2px;">Statistical Objective & Forecast Horizon</div>'
-            '<div>Model forecasts represent point estimates optimized for MultiRMSE loss over 21-trading-day horizons. Empirical residual error corridors, out-of-fold calibration curves, and independent holdout test verifications are documented in the model audit logs to ensure transparent risk measurement across market volatility regimes.</div>'
+            '<div style="font-size: 11px; font-weight: 600; color: #D4A853; text-transform: uppercase; margin-bottom: 2px;">Why doesn\'t machine learning beat EWMA on volatility?</div>'
+            '<div style="color: #8B949E;">In financial markets, volatility is strongly persistent; yesterday\'s volatility strongly dictates tomorrow\'s. Classical EWMA models this exponential decay exceptionally well. Machine learning matches EWMA on volatility, but delivers its genuine quantitative advantage by predicting <strong>path-dependent maximum drawdowns</strong> and adapting faster during <strong>sudden market panic</strong> where linear formulas lag.</div>'
             '</div>'
             '</div>'
         )
@@ -2218,7 +2369,7 @@ with tab_record:
     # -------------------------------------------------------------------------
     disclosure_html = (
         '<div style="font-size: 11px; color: #6E7681; margin-top: 14px; border-top: 1px solid #30363D; padding-top: 8px;">'
-        '<strong>Testing Integrity & Scope:</strong> Evaluated across 18 years of National Stock Exchange (NSE) historical data (4,917 out-of-fold days) using strict time-quarantine validation with zero lookahead. Machine learning patterns reflect historical statistical associations, not guarantees of future returns.'
+        '<strong>Testing Scope & Integrity:</strong> Evaluated across 4,917 out-of-fold portfolio forecasts over 825 distinct trading dates (2012–2026) using 5-fold walk-forward validation with a 21-day embargo to eliminate lookahead leakage. Machine learning models identify historical statistical associations, not guarantees of future returns.'
         '</div>'
     )
     st.markdown(disclosure_html, unsafe_allow_html=True)
